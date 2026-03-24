@@ -52,3 +52,6 @@ This file summarizes the current implementation state so future sessions can res
 2. Add focused in-game validation matrix (free hand vs tools, hand-mineable vs non-hand-mineable blocks).
 3. If needed, expose mining multipliers via configurable constants for faster balancing.
 
+## Investigation notes
+- Entity pushback/slip investigation: `changelogs/ENTITY_COLLISION_INVESTIGATION_README.md`
+

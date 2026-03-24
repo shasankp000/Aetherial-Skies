@@ -34,6 +34,7 @@ import net.minecraft.util.ItemScatterer;
 import net.minecraft.util.Identifier;
 
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -121,6 +122,15 @@ public class GravityBlockEntity extends Entity {
     private static final TrackedData<Float> SETTLE_PROGRESS =
             DataTracker.registerData(GravityBlockEntity.class, TrackedDataHandlerRegistry.FLOAT);
 
+    private static final TrackedData<Float> WAVE_METRIC =
+            DataTracker.registerData(GravityBlockEntity.class, TrackedDataHandlerRegistry.FLOAT);
+
+    private static final TrackedData<Float> PLAYER_LOAD =
+            DataTracker.registerData(GravityBlockEntity.class, TrackedDataHandlerRegistry.FLOAT);
+
+    private float smoothedPlayerLoad = 0.0f;
+    private float lastWaveMetric = 0.0f;
+
     // Constructor for entity creation
     public GravityBlockEntity(EntityType<?> type, World world) {
         super(type, world);
@@ -146,6 +156,8 @@ public class GravityBlockEntity extends Entity {
         builder.add(HORIZONTAL_SPEED, 0.0f);
         builder.add(IMPACT_AMPLITUDE, 0.0f);
         builder.add(SETTLE_PROGRESS, 0.0f);
+        builder.add(WAVE_METRIC, 0.0f);
+        builder.add(PLAYER_LOAD, 0.0f);
     }
 
     @Override
@@ -215,6 +227,14 @@ public class GravityBlockEntity extends Entity {
         return this.getDataTracker().get(SETTLE_PROGRESS);
     }
 
+    public float getTrackedWaveMetric() {
+        return this.getDataTracker().get(WAVE_METRIC);
+    }
+
+    public float getTrackedPlayerLoad() {
+        return this.getDataTracker().get(PLAYER_LOAD);
+    }
+
     @Override
     public void tick() {
         super.tick();
@@ -246,23 +266,42 @@ public class GravityBlockEntity extends Entity {
                 float fluidDensityScale = inLava ? 1.25f : 1.0f;
                 float effectiveRelativeDensity = profile.relativeDensity() / fluidDensityScale;
 
+                GravityData.WaveProfile waveProfile = GravityData.getWaveProfile(this.getWorld(), this.getBlockPos());
+                float playerLoadTarget = this.computePlayerLoadTarget();
+                // Smooth restoration when players step off instead of snapping instantly.
+                this.smoothedPlayerLoad = MathHelper.lerp(0.12f, this.smoothedPlayerLoad, playerLoadTarget);
+                if (this.smoothedPlayerLoad < 0.001f) {
+                    this.smoothedPlayerLoad = 0.0f;
+                }
+                this.lastWaveMetric = waveProfile.waveMetric();
+
                 // Submersion-dependent buoyancy. < 0 => upward acceleration (float), > 0 => sinking.
                 float displacementTerm = fluidDepth * profile.displacedVolume();
-                float netSpecificGravity = effectiveRelativeDensity - displacementTerm - (profile.buoyancyAssist() * fluidDepth);
+                // Option C hybrid load model: buoyancy is reduced by a smooth count+mass-based player load.
+                float netSpecificGravity = effectiveRelativeDensity - displacementTerm - (profile.buoyancyAssist() * fluidDepth) + this.smoothedPlayerLoad;
                 float netGravity = profile.gravityAccel() * netSpecificGravity;
 
                 velocity = velocity.add(0.0D, -netGravity, 0.0D);
+                velocity = this.applyFluidWaveForces(velocity, waveProfile, fluidDepth, effectiveRelativeDensity, inLava);
 
                 // Fluids damp linear motion much more than air.
                 double horizontalFluidDrag = MathHelper.clamp(0.86f - (fluidDepth * 0.10f), 0.62f, 0.90f);
                 double verticalFluidDrag = MathHelper.clamp(0.88f - (fluidDepth * 0.14f), 0.58f, 0.92f);
                 velocity = new Vec3d(velocity.x * horizontalFluidDrag, velocity.y * verticalFluidDrag, velocity.z * horizontalFluidDrag);
 
+                // Loaded floating blocks should remain standable: add extra lateral stabilization under load.
+                if (this.smoothedPlayerLoad > 0.0f) {
+                    double loadStability = MathHelper.clamp(1.0f - (this.smoothedPlayerLoad * 0.60f), 0.58f, 1.0f);
+                    velocity = new Vec3d(velocity.x * loadStability, velocity.y, velocity.z * loadStability);
+                }
+
                 // Avoid runaway upward acceleration while still allowing float-up for very light blocks.
                 if (velocity.y > 0.12D) {
                     velocity = new Vec3d(velocity.x, 0.12D, velocity.z);
                 }
             } else {
+                this.smoothedPlayerLoad = MathHelper.lerp(0.10f, this.smoothedPlayerLoad, 0.0f);
+                this.lastWaveMetric = 0.0f;
                 velocity = velocity.add(0.0D, -profile.gravityAccel(), 0.0D);
             }
         }
@@ -308,6 +347,72 @@ public class GravityBlockEntity extends Entity {
         this.getDataTracker().set(HORIZONTAL_SPEED, horizontalSpeed);
         this.getDataTracker().set(SETTLE_PROGRESS, settle);
         this.getDataTracker().set(IMPACT_AMPLITUDE, impact);
+        this.getDataTracker().set(WAVE_METRIC, this.lastWaveMetric);
+        this.getDataTracker().set(PLAYER_LOAD, this.smoothedPlayerLoad);
+    }
+
+    private Vec3d applyFluidWaveForces(Vec3d velocity, GravityData.WaveProfile waveProfile, float fluidDepth, float effectiveRelativeDensity, boolean inLava) {
+        long worldTime = this.getWorld().getTime();
+        double phase = (worldTime * waveProfile.frequency()) + (this.getX() * 0.23D) + (this.getZ() * 0.19D);
+        double wave = Math.sin(phase) * waveProfile.verticalAmplitude();
+        double secondaryWave = Math.cos((phase * 0.63D) + 1.2D) * waveProfile.turbulence();
+
+        float waveResponse = MathHelper.clamp(1.18f - (effectiveRelativeDensity * 0.45f) - (this.smoothedPlayerLoad * 1.1f), 0.15f, 1.2f);
+        if (inLava) {
+            waveResponse *= 0.65f;
+        }
+
+        // Prevent excessive lateral slip while standing on floating blocks.
+        float driftResponse = MathHelper.clamp(waveResponse * (1.0f - (this.smoothedPlayerLoad * 1.35f)), 0.08f, 1.0f);
+
+        double waveVerticalAccel = (wave + secondaryWave) * waveProfile.waveMetric() * fluidDepth * waveResponse;
+        double driftX = Math.cos(phase * 0.41D) * waveProfile.horizontalDrift() * waveProfile.waveMetric() * fluidDepth * driftResponse;
+        double driftZ = Math.sin((phase * 0.37D) + 0.8D) * waveProfile.horizontalDrift() * waveProfile.waveMetric() * fluidDepth * driftResponse;
+
+        return velocity.add(driftX, waveVerticalAccel, driftZ);
+    }
+
+    private float computePlayerLoadTarget() {
+        Box topBand = this.getBoundingBox()
+                .expand(-0.06D, 0.0D, -0.06D)
+                .stretch(0.0D, 0.45D, 0.0D)
+                .offset(0.0D, 0.02D, 0.0D);
+
+        List<PlayerEntity> players = this.getWorld().getEntitiesByClass(
+                PlayerEntity.class,
+                topBand,
+                player -> !player.isSpectator() && player.getBoundingBox().minY >= this.getBoundingBox().maxY - 0.03D
+        );
+
+        if (players.isEmpty()) {
+            return 0.0f;
+        }
+
+        float massProxyTotal = 0.0f;
+        for (PlayerEntity player : players) {
+            massProxyTotal += this.estimatePlayerMassProxy(player);
+        }
+
+        // Option C hybrid: combine count and mass proxies with clamping for stability.
+        float countTerm = Math.min(0.32f, players.size() * 0.10f);
+        float massTerm = Math.min(0.35f, massProxyTotal * 0.12f);
+        return MathHelper.clamp((countTerm * 0.55f) + (massTerm * 0.45f), 0.0f, 0.65f);
+    }
+
+    private float estimatePlayerMassProxy(PlayerEntity player) {
+        float proxy = 1.0f;
+        for (ItemStack armorStack : player.getArmorItems()) {
+            if (!armorStack.isEmpty()) {
+                proxy += 0.07f;
+            }
+        }
+        if (!player.getMainHandStack().isEmpty()) {
+            proxy += 0.04f;
+        }
+        if (player.isSneaking()) {
+            proxy += 0.05f;
+        }
+        return proxy;
     }
 
     private Vec3d resolveCollisionResponse(Vec3d velocity, GravityData.PhysicsProfile profile, float mass) {
@@ -633,6 +738,8 @@ public class GravityBlockEntity extends Entity {
         nbt.putFloat("HorizontalSpeed", this.getTrackedHorizontalSpeed());
         nbt.putFloat("ImpactAmplitude", this.getTrackedImpactAmplitude());
         nbt.putFloat("SettleProgress", this.getTrackedSettleProgress());
+        nbt.putFloat("WaveMetric", this.getTrackedWaveMetric());
+        nbt.putFloat("PlayerLoad", this.getTrackedPlayerLoad());
         nbt.putDouble("Weight", this.weight);
         nbt.putInt("SettleTicks", this.settleTicks);
         nbt.putString("BlockId", this.getBlockIdString());
@@ -675,6 +782,10 @@ public class GravityBlockEntity extends Entity {
         this.getDataTracker().set(HORIZONTAL_SPEED, nbt.contains("HorizontalSpeed") ? nbt.getFloat("HorizontalSpeed") : 0.0f);
         this.getDataTracker().set(IMPACT_AMPLITUDE, nbt.contains("ImpactAmplitude") ? nbt.getFloat("ImpactAmplitude") : 0.0f);
         this.getDataTracker().set(SETTLE_PROGRESS, nbt.contains("SettleProgress") ? nbt.getFloat("SettleProgress") : 0.0f);
+        this.smoothedPlayerLoad = nbt.contains("PlayerLoad") ? nbt.getFloat("PlayerLoad") : 0.0f;
+        this.lastWaveMetric = nbt.contains("WaveMetric") ? nbt.getFloat("WaveMetric") : 0.0f;
+        this.getDataTracker().set(WAVE_METRIC, this.lastWaveMetric);
+        this.getDataTracker().set(PLAYER_LOAD, this.smoothedPlayerLoad);
     }
 
 

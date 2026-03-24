@@ -5,6 +5,9 @@ import net.minecraft.block.Block;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
+import net.minecraft.world.biome.BiomeKeys;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -36,9 +39,26 @@ public class GravityData {
     ) {
     }
 
+    // Wave metric is intentionally explicit so it can be authored from worldgen/biome logic later.
+    public record WaveProfile(
+            float waveMetric,
+            float verticalAmplitude,
+            float frequency,
+            float horizontalDrift,
+            float turbulence
+    ) {
+    }
+
     private static final Set<Identifier> GRAVITY_ENABLED_BLOCKS = new HashSet<>();
     private static final Map<Identifier, Float> GRAVITY_WEIGHTS = new HashMap<>();
     private static final Map<Identifier, PhysicsProfile> PHYSICS_PROFILES = new HashMap<>();
+
+    // Keep calm-water drift subtle; ocean profiles remain stronger for open-water feel.
+    private static final WaveProfile DEFAULT_WAVE_PROFILE = new WaveProfile(0.45f, 0.016f, 0.10f, 0.0045f, 0.008f);
+    private static final WaveProfile RIVER_WAVE_PROFILE = new WaveProfile(0.30f, 0.010f, 0.12f, 0.0065f, 0.006f);
+    private static final WaveProfile SWAMP_WAVE_PROFILE = new WaveProfile(0.22f, 0.007f, 0.08f, 0.0035f, 0.004f);
+    private static final WaveProfile OCEAN_WAVE_PROFILE = new WaveProfile(1.00f, 0.032f, 0.11f, 0.020f, 0.014f);
+    private static final WaveProfile DEEP_OCEAN_WAVE_PROFILE = new WaveProfile(1.25f, 0.040f, 0.105f, 0.026f, 0.018f);
 
     private static final PhysicsProfile DEFAULT_PROFILE = new PhysicsProfile(
             1.0f,
@@ -159,6 +179,36 @@ public class GravityData {
             profiles.add(getProfile(block));
         }
         return composeHydrodynamics(profiles);
+    }
+
+    public static WaveProfile getWaveProfile(World world, BlockPos pos) {
+        if (world == null || pos == null) {
+            return DEFAULT_WAVE_PROFILE;
+        }
+
+        var biome = world.getBiome(pos);
+
+        if (biome.matchesKey(BiomeKeys.DEEP_OCEAN)
+                || biome.matchesKey(BiomeKeys.DEEP_COLD_OCEAN)
+                || biome.matchesKey(BiomeKeys.DEEP_FROZEN_OCEAN)
+                || biome.matchesKey(BiomeKeys.DEEP_LUKEWARM_OCEAN)) {
+            return DEEP_OCEAN_WAVE_PROFILE;
+        }
+        if (biome.matchesKey(BiomeKeys.OCEAN)
+                || biome.matchesKey(BiomeKeys.COLD_OCEAN)
+                || biome.matchesKey(BiomeKeys.FROZEN_OCEAN)
+                || biome.matchesKey(BiomeKeys.LUKEWARM_OCEAN)
+                || biome.matchesKey(BiomeKeys.WARM_OCEAN)) {
+            return OCEAN_WAVE_PROFILE;
+        }
+        if (biome.matchesKey(BiomeKeys.RIVER) || biome.matchesKey(BiomeKeys.FROZEN_RIVER)) {
+            return RIVER_WAVE_PROFILE;
+        }
+        if (biome.matchesKey(BiomeKeys.SWAMP) || biome.matchesKey(BiomeKeys.MANGROVE_SWAMP)) {
+            return SWAMP_WAVE_PROFILE;
+        }
+
+        return DEFAULT_WAVE_PROFILE;
     }
 
     public static PhysicsProfile getDefaultProfile() {
