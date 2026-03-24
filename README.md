@@ -1,15 +1,17 @@
-# Aetherial Skies
+# Aetherial-Skies
 
 Fabric mod for Minecraft `1.21.4` (Java 21).
 
 ## What this project is
-Aetherial Skies turns selected placed blocks into a custom falling entity with custom physics and mining behavior.
+Aetherial-Skies aims to be a lightweight, modular, physics engine that adds gravity blocks and gravity based entity supports, aiming to be an alternative of the famous but yet buggy mod, ValkyrienSkies.
+(This is not a fork of ValkyrienSkies, but a new mod built from scratch with the same goals in mind)
 
 - Mod id: `aetherial-skies`
 - Main entrypoint: `net.shasankp000.AetherialSkies`
 - Client entrypoint: `net.shasankp000.AetherialSkiesClient`
 
 For codebase architecture and agent-focused guidance, see `AGENTS.md`.
+For latest implementation checkpoint notes and session continuity, see `changelogs/README.md`.
 
 ## Prerequisites
 - OS: Linux/macOS/Windows
