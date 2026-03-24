@@ -12,7 +12,6 @@ Aetherial-Skies aims to be a lightweight, modular, physics engine that adds grav
 
 # For mod development and contribution
 
-For codebase architecture and agent-focused guidance, see `AGENTS.md`.
 For latest implementation checkpoint notes and session continuity, see `changelogs/README.md`.
 
 ---
