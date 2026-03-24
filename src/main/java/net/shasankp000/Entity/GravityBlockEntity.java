@@ -505,15 +505,23 @@ public class GravityBlockEntity extends Entity {
                     if (!tool.isEmpty()) {
                         String toolPath = Registries.ITEM.getId(tool.getItem()).getPath();
                         progressIncrement *= ToolStrength.getToolMultiplier(toolPath);
-                    }
-
-                    // Hand mining stays intentionally slow for non hand-mineable blocks.
-                    if (tool.isEmpty() && !HandMineableBlocks.isHandMineable(this.getBlockIdString())) {
-                        progressIncrement *= 0.08f;
+                    } else {
+                        // Hand mining should still be valid and show crack progression.
+                        if (HandMineableBlocks.isHandMineable(this.getBlockIdString())) {
+                            progressIncrement *= 1.15f;
+                        } else {
+                            // Non-hand-mineable blocks remain slower by hand, but still progress.
+                            progressIncrement *= 0.55f;
+                        }
                     }
 
                     // Prevent pathological spikes while preserving material differences.
                     progressIncrement = MathHelper.clamp(progressIncrement, 0.0f, 0.25f);
+
+                    // Ensure tiny-but-visible progress for hand mining so cracks appear as expected.
+                    if (tool.isEmpty()) {
+                        progressIncrement = Math.max(progressIncrement, 0.0012f);
+                    }
 
 
                     // Increase the mining progress.
