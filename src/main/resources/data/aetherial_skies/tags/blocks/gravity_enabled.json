@@ -1,0 +1,19 @@
+{
+  "replace": false,
+  "values": [
+    "minecraft:sand",
+    "minecraft:gravel",
+    "minecraft:anvil",
+    "minecraft:dirt",
+    "minecraft:cobblestone",
+    "minecraft:stone",
+    "minecraft:grass_block",
+    "minecraft:oak_planks",
+    "minecraft:bookshelf",
+    "minecraft:netherrack",
+    "minecraft:end_stone",
+    "minecraft:clay",
+    "minecraft:brick_block",
+    "minecraft:quartz_block"
+  ]
+}
