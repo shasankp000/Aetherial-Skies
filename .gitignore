@@ -40,5 +40,4 @@ replay_*.log
 *.jfr
 
 # github copilot specifics
-
 AGENTS.md
