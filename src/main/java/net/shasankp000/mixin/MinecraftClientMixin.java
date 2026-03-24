@@ -2,6 +2,7 @@ package net.shasankp000.mixin;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.shasankp000.Entity.GravityBlockEntity;
@@ -58,6 +59,7 @@ public abstract class MinecraftClientMixin {
         // First click comes from vanilla doAttack(); sustained hold continues mining at a steady cadence.
         if (this.wasHoldingGravityMine && this.gravityMineHoldIntervalTicks-- <= 0) {
             this.interactionManager.attackEntity(this.player, target);
+            this.player.swingHand(Hand.MAIN_HAND);
             this.gravityMineHoldIntervalTicks = 1;
         }
 

@@ -40,6 +40,7 @@ import net.minecraft.world.World;
 import net.shasankp000.Gravity.GravityData;
 import net.shasankp000.Util.BlockStateRegistry;
 import net.shasankp000.Util.HandMineableBlocks;
+import net.shasankp000.Util.ToolStrength;
 
 
 import java.util.List;
@@ -500,12 +501,19 @@ public class GravityBlockEntity extends Entity {
 
                     float progressIncrement = vanillaDelta;
 
+                    // Keep tool-material differences visible (wood < stone < iron < diamond/netherite).
+                    if (!tool.isEmpty()) {
+                        String toolPath = Registries.ITEM.getId(tool.getItem()).getPath();
+                        progressIncrement *= ToolStrength.getToolMultiplier(toolPath);
+                    }
+
                     // Hand mining stays intentionally slow for non hand-mineable blocks.
                     if (tool.isEmpty() && !HandMineableBlocks.isHandMineable(this.getBlockIdString())) {
                         progressIncrement *= 0.08f;
                     }
 
-                    progressIncrement = MathHelper.clamp(progressIncrement, 0.0f, 0.12f);
+                    // Prevent pathological spikes while preserving material differences.
+                    progressIncrement = MathHelper.clamp(progressIncrement, 0.0f, 0.25f);
 
 
                     // Increase the mining progress.
