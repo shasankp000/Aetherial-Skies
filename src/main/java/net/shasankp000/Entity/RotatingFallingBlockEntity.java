@@ -100,8 +100,8 @@ public class RotatingFallingBlockEntity extends FallingBlockEntity {
 
 
     @Override
-    public Packet<ClientPlayPacketListener> createSpawnPacket(net.minecraft.server.network.EntityTrackerEntry entry) {
-        return super.createSpawnPacket(entry);
+    public Packet<ClientPlayPacketListener> createSpawnPacket() {
+        return super.createSpawnPacket();
     }
 
 

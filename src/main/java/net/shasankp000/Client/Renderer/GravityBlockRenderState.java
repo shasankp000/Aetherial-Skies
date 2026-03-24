@@ -1,11 +1,10 @@
 package net.shasankp000.Client.Renderer;
 
 import net.minecraft.block.BlockState;
-import net.minecraft.client.render.entity.state.EntityRenderState;
 import net.minecraft.util.math.BlockPos;
 import net.shasankp000.Entity.GravityBlockEntity;
 
-public class GravityBlockRenderState extends EntityRenderState{
+public class GravityBlockRenderState {
 
     public GravityBlockEntity entity;
     public float tickDelta;

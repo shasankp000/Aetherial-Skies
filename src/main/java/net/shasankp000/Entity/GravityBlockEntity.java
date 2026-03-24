@@ -13,17 +13,12 @@ import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
-import net.minecraft.loot.context.LootContextParameters;
-import net.minecraft.loot.context.LootWorldContext;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtHelper;
 import net.minecraft.network.listener.ClientPlayPacketListener;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
 import net.minecraft.registry.Registries;
-import net.minecraft.registry.RegistryEntryLookup;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.network.EntityTrackerEntry;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -138,26 +133,26 @@ public class GravityBlockEntity extends Entity {
     }
 
     @Override
-    public Packet<ClientPlayPacketListener> createSpawnPacket(EntityTrackerEntry entityTrackerEntry) {
-        return new EntitySpawnS2CPacket(this, entityTrackerEntry);
+    public Packet<ClientPlayPacketListener> createSpawnPacket() {
+        return new EntitySpawnS2CPacket(this);
     }
 
 
     @Override
-    protected void initDataTracker(DataTracker.Builder builder) {
-        builder.add(BLOCK_STATE, Blocks.AIR.getDefaultState());
-        builder.add(BLOCK_ID, "minecraft:air"); // default value.
-        builder.add(ROTATION, 0.0f);
-        builder.add(PREVIOUS_ROTATION, 0.0f);
-        builder.add(TIMER_STATE, 0);
-        builder.add(ROLL, 0.0f);
-        builder.add(MINING_PROGRESS, 0.0f);
-        builder.add(VERTICAL_SPEED, 0.0f);
-        builder.add(HORIZONTAL_SPEED, 0.0f);
-        builder.add(IMPACT_AMPLITUDE, 0.0f);
-        builder.add(SETTLE_PROGRESS, 0.0f);
-        builder.add(WAVE_METRIC, 0.0f);
-        builder.add(PLAYER_LOAD, 0.0f);
+    protected void initDataTracker() {
+        this.dataTracker.startTracking(BLOCK_STATE, Blocks.AIR.getDefaultState());
+        this.dataTracker.startTracking(BLOCK_ID, "minecraft:air"); // default value.
+        this.dataTracker.startTracking(ROTATION, 0.0f);
+        this.dataTracker.startTracking(PREVIOUS_ROTATION, 0.0f);
+        this.dataTracker.startTracking(TIMER_STATE, 0);
+        this.dataTracker.startTracking(ROLL, 0.0f);
+        this.dataTracker.startTracking(MINING_PROGRESS, 0.0f);
+        this.dataTracker.startTracking(VERTICAL_SPEED, 0.0f);
+        this.dataTracker.startTracking(HORIZONTAL_SPEED, 0.0f);
+        this.dataTracker.startTracking(IMPACT_AMPLITUDE, 0.0f);
+        this.dataTracker.startTracking(SETTLE_PROGRESS, 0.0f);
+        this.dataTracker.startTracking(WAVE_METRIC, 0.0f);
+        this.dataTracker.startTracking(PLAYER_LOAD, 0.0f);
     }
 
     @Override
@@ -598,7 +593,11 @@ public class GravityBlockEntity extends Entity {
     }
 
     @Override
-    public boolean damage(ServerWorld world, DamageSource source, float amount) {
+    public boolean damage(DamageSource source, float amount) {
+        ServerWorld world = this.getWorld() instanceof ServerWorld serverWorld ? serverWorld : null;
+        if (world == null) {
+            return false;
+        }
         boolean value = false;
         if (!world.isClient) {
             if (source.getAttacker() instanceof ServerPlayerEntity player) {
@@ -678,11 +677,7 @@ public class GravityBlockEntity extends Entity {
 
 
                         // Drop the items.
-                        LootWorldContext.Builder builder = (new LootWorldContext.Builder(world))
-                                .add(LootContextParameters.ORIGIN, Vec3d.ofCenter(pos))
-                                .add(LootContextParameters.TOOL, tool)
-                                .addOptional(LootContextParameters.BLOCK_ENTITY, null);
-                        List<ItemStack> drops = state.getDroppedStacks(builder);
+                        List<ItemStack> drops = Block.getDroppedStacks(state, world, pos, null, player, tool);
                         if (!drops.isEmpty()) {
                             for (ItemStack drop : drops) {
                                 ItemScatterer.spawn(world, pos.getX(), pos.getY(), pos.getZ(), drop);
@@ -763,12 +758,8 @@ public class GravityBlockEntity extends Entity {
         this.miningProgress = nbt.contains("MiningProgress") ? nbt.getFloat("MiningProgress") : 0.0f;
         this.weight = nbt.contains("Weight") ? nbt.getDouble("Weight") : this.weight;
 
-        RegistryWrapper.WrapperLookup registryLookup = this.getWorld().getRegistryManager();
-        RegistryEntryLookup<Block> blockLookup = registryLookup.getOrThrow(RegistryKeys.BLOCK);
         BlockState restoredState = null;
-        if (nbt.contains("BlockState")) {
-            restoredState = NbtHelper.toBlockState(blockLookup, nbt.getCompound("BlockState"));
-        } else if (nbt.contains("BlockId")) {
+        if (nbt.contains("BlockId")) {
             restoredState = BlockStateRegistry.getDefaultStateFor(nbt.getString("BlockId"));
         }
 

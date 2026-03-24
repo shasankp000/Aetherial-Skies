@@ -24,9 +24,9 @@ public abstract class PlayerEntityMixin {
 
         // Prevent vanilla entity-combat attack sounds/logic; we treat this as mining interaction instead.
         if (player.getWorld() instanceof ServerWorld serverWorld) {
-            float attackDamage = (float) player.getAttributeValue(EntityAttributes.ATTACK_DAMAGE);
+            float attackDamage = (float) player.getAttributeValue(EntityAttributes.GENERIC_ATTACK_DAMAGE);
             DamageSource source = player.getDamageSources().playerAttack(player);
-            gravityBlock.damage(serverWorld, source, attackDamage);
+            gravityBlock.damage(source, attackDamage);
         }
 
         ci.cancel();

@@ -3,7 +3,9 @@ package net.shasankp000;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.EntityDimensions;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnGroup;
 import net.minecraft.registry.Registries;
@@ -32,23 +34,16 @@ public class AetherialSkies implements ModInitializer {
 		return blocksToCheck;
 	}
 
-	@SuppressWarnings("unchecked")
-	public static final RegistryKey<EntityType<GravityBlockEntity>> GRAVITY_BLOCK_KEY =
-			(RegistryKey<EntityType<GravityBlockEntity>>) (Object)
-					RegistryKey.of(Registries.ENTITY_TYPE.getKey(), Identifier.of(MOD_ID, "gravity_affected_block"));
-
-
 	// Register the custom entity type (Replacing FabricEntityTypeBuilder with EntityType.Builder)
-	@SuppressWarnings("unchecked")
 	public static final EntityType<GravityBlockEntity> GRAVITY_BLOCK_ENTITY =
 			Registry.register(
 					Registries.ENTITY_TYPE,
-					Identifier.of(MOD_ID, "gravity_affected_block"),
-					EntityType.Builder.create(GravityBlockEntity::new, SpawnGroup.MISC)
-							.dimensions(1.0f, 1.0f)  // Standard block size (1x1)
-							.maxTrackingRange(128)      // Adjust tracking range if needed
-							.trackingTickInterval(1)    // How often to send updates to clients
-							.build((RegistryKey<EntityType<?>>)(Object) GRAVITY_BLOCK_KEY)
+					new Identifier(MOD_ID, "gravity_affected_block"),
+					FabricEntityTypeBuilder.create(SpawnGroup.MISC, GravityBlockEntity::new)
+							.dimensions(EntityDimensions.fixed(1.0f, 1.0f))
+							.trackRangeBlocks(128)
+							.trackedUpdateRate(1)
+							.build()
 			);
 
 	@Override

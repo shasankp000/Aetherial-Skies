@@ -15,7 +15,7 @@ import net.shasankp000.Entity.GravityBlockEntity;
 import net.shasankp000.Gravity.GravityData;
 import net.shasankp000.Util.BlockStateRegistry;
 
-public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntity, GravityBlockRenderState> {
+public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntity> {
 
     // Store the BlockRenderManager from the context.
     private final BlockRenderManager blockRenderManager;
@@ -27,54 +27,29 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
     }
 
     @Override
-    public GravityBlockRenderState createRenderState() {
-        return new GravityBlockRenderState();
-    }
+    public void render(GravityBlockEntity entity, float entityYaw, float tickDelta, MatrixStack matrices, VertexConsumerProvider vertexConsumers, int light) {
+        String blockIdString = entity.getBlockIdString();
+        int timerState = entity.getLandingTimer();
+        float currentRotation = entity.getCurrentRotation();
+        float previousRotation = entity.getPreviousRotation();
+        float roll = entity.getRoll();
+        float miningProgress = entity.getMiningProgress();
+        float verticalSpeed = entity.getTrackedVerticalSpeed();
+        float horizontalSpeed = entity.getTrackedHorizontalSpeed();
+        float impactAmplitude = entity.getTrackedImpactAmplitude();
+        float settleProgress = entity.getTrackedSettleProgress();
+        float age = entity.age + tickDelta;
+        float renderYaw = entity.getYaw();
+        float renderPitch = entity.getPitch();
+        BlockPos renderPos = entity.getBlockPos();
 
-    @Override
-    public void updateRenderState(GravityBlockEntity entity, GravityBlockRenderState state, float tickDelta) {
-        // Populate our custom render state with the entity and tickDelta.
-        state.entity = entity;
-        state.tickDelta = tickDelta;
-        state.blockIdString = entity.getBlockIdString();
-        state.timerState = entity.getLandingTimer();
-
-//        System.out.println("tickDelta: " + tickDelta);
-
-        // Retrieve rotation values from DataTracker:
-        state.currentRotation = entity.getCurrentRotation();
-        state.previousRotation = entity.getPreviousRotation();
-
-        state.roll = entity.getRoll();
-        state.miningProgress = entity.getMiningProgress();
-        state.verticalSpeed = entity.getTrackedVerticalSpeed();
-        state.horizontalSpeed = entity.getTrackedHorizontalSpeed();
-        state.impactAmplitude = entity.getTrackedImpactAmplitude();
-        state.settleProgress = entity.getTrackedSettleProgress();
-        state.age = entity.age + tickDelta;
-        state.renderYaw = entity.getYaw();
-        state.renderPitch = entity.getPitch();
-        state.renderPos = entity.getBlockPos();
-
-
-//        System.out.println("State's blockIdString: " + state.blockIdString);
-
-        // Use the entity's block state if available, otherwise use fallback:
-        BlockState bs = entity.getBlockState();
-        if (bs == null) {
-            // Fallback: look up using the stored registry name
-            bs = BlockStateRegistry.getDefaultStateFor(state.blockIdString);
+        BlockState blockState = entity.getBlockState();
+        if (blockState == null) {
+            blockState = BlockStateRegistry.getDefaultStateFor(blockIdString);
         }
-        state.blockState = bs;
-        state.blockWeight = GravityData.getProfile(bs.getBlock()).mass();
 
-        state.interpolatedRotation = MathHelper.lerp(tickDelta, state.previousRotation, state.currentRotation);
-
-    }
-
-    @Override
-    public void render(GravityBlockRenderState state, MatrixStack matrices, VertexConsumerProvider vertexConsumers, int light) {
-        GravityBlockEntity entity = state.entity;
+        float blockWeight = GravityData.getProfile(blockState.getBlock()).mass();
+        float interpolatedRotation = MathHelper.lerp(tickDelta, previousRotation, currentRotation);
 
 //        System.out.println("Rendering entity: " + entity.getName().getString() + "with block state: " + state.blockState);
 
@@ -87,28 +62,28 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
 
         // Compute interpolated rotation.
 
-        float weightFactor = MathHelper.clamp(1.0f / Math.max(state.blockWeight, 0.75f), 0.35f, 1.2f);
-        float airborneFactor = state.timerState > 0 ? 0.0f : 1.0f;
+        float weightFactor = MathHelper.clamp(1.0f / Math.max(blockWeight, 0.75f), 0.35f, 1.2f);
+        float airborneFactor = timerState > 0 ? 0.0f : 1.0f;
 
         // Airborne tilt follows motion; on impact we switch to damped wobble as the block settles.
-        float forwardTilt = MathHelper.clamp(-state.verticalSpeed * 6.0f, -14.0f, 14.0f) * airborneFactor * weightFactor;
-        float lateralTilt = MathHelper.clamp(state.horizontalSpeed * 26.0f, 0.0f, 11.0f) * airborneFactor * weightFactor;
+        float forwardTilt = MathHelper.clamp(-verticalSpeed * 6.0f, -14.0f, 14.0f) * airborneFactor * weightFactor;
+        float lateralTilt = MathHelper.clamp(horizontalSpeed * 26.0f, 0.0f, 11.0f) * airborneFactor * weightFactor;
 
-        float wobbleDecay = 1.0f - state.settleProgress;
-        float wobbleWave = (float) Math.sin((state.age * 0.8f) + (state.interpolatedRotation * 0.12f));
-        float impactTilt = wobbleWave * 8.0f * state.impactAmplitude * wobbleDecay * weightFactor;
-        float impactLift = Math.abs(wobbleWave) * 0.05f * state.impactAmplitude * wobbleDecay;
+        float wobbleDecay = 1.0f - settleProgress;
+        float wobbleWave = (float) Math.sin((age * 0.8f) + (interpolatedRotation * 0.12f));
+        float impactTilt = wobbleWave * 8.0f * impactAmplitude * wobbleDecay * weightFactor;
+        float impactLift = Math.abs(wobbleWave) * 0.05f * impactAmplitude * wobbleDecay;
 
-        float squash = 1.0f - (0.08f * state.impactAmplitude * wobbleDecay);
-        float stretch = 1.0f + (0.08f * state.impactAmplitude * wobbleDecay);
+        float squash = 1.0f - (0.08f * impactAmplitude * wobbleDecay);
+        float stretch = 1.0f + (0.08f * impactAmplitude * wobbleDecay);
 
-        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(state.renderYaw + (state.interpolatedRotation * 0.15f)));
-        matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees(state.renderPitch + forwardTilt + impactTilt));
-        matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees(state.roll + lateralTilt - (impactTilt * 0.5f)));
+        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(renderYaw + (interpolatedRotation * 0.15f)));
+        matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees(renderPitch + forwardTilt + impactTilt));
+        matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees(roll + lateralTilt - (impactTilt * 0.5f)));
 
 
 
-        BlockState stateToRender = state.blockState;
+        BlockState stateToRender = blockState;
 //        System.out.println("Rendering block state: " + stateToRender + " (RenderType: " + stateToRender.getRenderType() + ")");
 
 
@@ -119,19 +94,19 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
 
         // Compute a vertical offset so that the model's bottom stays on the ground.
         double blockHeight = 1.0;
-        double pitchRad = Math.toRadians(Math.abs(state.renderPitch));
+        double pitchRad = Math.toRadians(Math.abs(renderPitch));
         double verticalOffset = blockHeight * Math.sin(pitchRad);
         // Move upward by the offset.
         matrices.translate(0, verticalOffset + impactLift, 0);
 
-        if (state.timerState > 0) {
+        if (timerState > 0) {
             // Keep the compressed model visually grounded while scaling during impact.
             matrices.translate(0.0, (1.0f - squash) * 0.5f, 0.0);
             matrices.scale(stretch, squash, stretch);
         }
 
 
-        BlockPos pos = state.renderPos;
+        BlockPos pos = renderPos;
         var world = entity.getWorld();
         var model = this.blockRenderManager.getModel(stateToRender);
 //        System.out.println("Baked model " + model);
@@ -156,12 +131,17 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
                 overlay
         );
 
-        float normalizedProgress = MathHelper.clamp(state.miningProgress / MINING_THRESHOLD, 0.0f, 1.0f);
+        float normalizedProgress = MathHelper.clamp(miningProgress / MINING_THRESHOLD, 0.0f, 1.0f);
         int stage = MathHelper.clamp((int) (normalizedProgress * 10.0f) - 1, -1, 9);
         if (stage >= 0) {
-            Identifier crackTexture = Identifier.of("minecraft", "textures/block/destroy_stage_" + stage + ".png");
+            Identifier crackTexture = new Identifier("minecraft", "textures/block/destroy_stage_" + stage + ".png");
             VertexConsumer crackConsumer = vertexConsumers.getBuffer(RenderLayer.getBlockBreaking(crackTexture));
-            VertexConsumer overlayConsumer = new OverlayVertexConsumer(crackConsumer, matrices.peek(), 1.0f);
+            VertexConsumer overlayConsumer = new OverlayVertexConsumer(
+                    crackConsumer,
+                    matrices.peek().getPositionMatrix(),
+                    matrices.peek().getNormalMatrix(),
+                    1.0f
+            );
             renderer.render(
                     world,
                     model,
@@ -183,7 +163,7 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
     public Identifier getTexture(GravityBlockEntity entity) {
         // This method is not really used since we're rendering a block state,
         // but you must return something. We'll return a fallback texture.
-        return Identifier.of("minecraft", "textures/block/stone.png");
+        return new Identifier("minecraft", "textures/block/stone.png");
     }
 
 //    private void renderCrackOverlay(MatrixStack matrices, int light, Identifier texture) {
