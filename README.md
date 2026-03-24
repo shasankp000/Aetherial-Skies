@@ -10,8 +10,17 @@ Aetherial-Skies aims to be a lightweight, modular, physics engine that adds grav
 - Main entrypoint: `net.shasankp000.AetherialSkies`
 - Client entrypoint: `net.shasankp000.AetherialSkiesClient`
 
+# For mod development and contribution
+
 For codebase architecture and agent-focused guidance, see `AGENTS.md`.
 For latest implementation checkpoint notes and session continuity, see `changelogs/README.md`.
+
+---
+# Initial Mod demo (work in progress)
+
+<div style="position:relative; width:100%; height:0px; padding-bottom:56.250%"><iframe allow="fullscreen" allowfullscreen height="100%" src="https://streamable.com/e/fah157?" width="100%" style="border:none; width:100%; height:100%; position:absolute; left:0px; top:0px; overflow:hidden;"></iframe></div>
+
+---
 
 ## Prerequisites
 - OS: Linux/macOS/Windows
@@ -26,7 +35,7 @@ Clone and build with the Gradle wrapper.
 
 ### Linux/macOS
 ```bash
-git clone <your-fork-or-repo-url>
+git clone https://github.com/shasankp000/Aetherial-Skies.git
 cd Aetherial-Skies
 chmod +x gradlew
 ./gradlew --version
@@ -35,7 +44,7 @@ chmod +x gradlew
 
 ### Windows (PowerShell)
 ```powershell
-git clone <your-fork-or-repo-url>
+git clone https://github.com/shasankp000/Aetherial-Skies.git
 cd Aetherial-Skies
 .\gradlew.bat --version
 .\gradlew.bat clean build
