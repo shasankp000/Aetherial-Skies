@@ -10,6 +10,31 @@ Aetherial-Skies aims to be a lightweight, modular, physics engine that adds grav
 - Main entrypoint: `net.shasankp000.AetherialSkies`
 - Client entrypoint: `net.shasankp000.AetherialSkiesClient`
 
+## Feature status
+
+### Implemented (working in-game)
+- Gravity-enabled placed blocks convert into a custom falling entity (`GravityBlockEntity`).
+- Single-block rigid-body-like fall behavior with rotation, impact damping, and settling.
+- Survival mining on gravity blocks with hold-left-click support, crack progression, and block-mining sound routing.
+- Tool-relative mining progression (wood/stone/iron/diamond/netherite) and valid free-hand mining path.
+- Correct crack overlay rendering (destroy-stage textures) tied to mining progress with regression on stop.
+- Registry-based block identity + DataTracker/NBT sync for stable server/client rendering and relog persistence.
+- Single-block fluid interaction: relative-density buoyancy, sinking/floating behavior, and wave-driven bobbing/drift.
+
+### Planned roadmap
+- Multi-block structures/ships/rafts using aggregated hydrodynamics (mass, displacement, effective density).
+- Hull-aware floating behavior so vessel shape/composition controls buoyancy realistically.
+- Biome/worldgen-driven wave metrics (stronger oceans/deep oceans, calmer inland waters) exposed as tunable data.
+- Structure systems will not be limited to water: land-based multi-block structure support is planned as well.
+- Further standability/collision tuning for players standing on floating entities (top-face push exemptions).
+- Ongoing in-game balancing pass for mining cadence and fluid response constants.
+
+### Current WIP / known limitations
+- Standing on floating single-block entities can still feel unstable in some cases because entity pushback/collision handling is still being tuned.
+- Fluid-wave behavior is currently profile-driven in code; worldgen/data-driven wave metrics are planned but not finalized.
+- Multi-block structures (water and land) are planned but not implemented yet.
+- Mining and tool-speed balance is playable, but values are still under active tuning for closer vanilla feel.
+
 # For mod development and contribution
 
 For latest implementation checkpoint notes and session continuity, see `changelogs/README.md`.

@@ -55,3 +55,19 @@ This file summarizes the current implementation state so future sessions can res
 ## Investigation notes
 - Entity pushback/slip investigation: `changelogs/ENTITY_COLLISION_INVESTIGATION_README.md`
 
+## Feature roadmap mirror
+
+### Planned roadmap
+- Multi-block structures/ships/rafts using aggregated hydrodynamics (mass, displacement, effective density).
+- Hull-aware floating behavior so vessel shape/composition controls buoyancy realistically.
+- Biome/worldgen-driven wave metrics (stronger oceans/deep oceans, calmer inland waters) exposed as tunable data.
+- Structure systems are planned for both water and land (not water-only).
+- Further standability/collision tuning for players standing on floating entities (top-face push exemptions).
+- Ongoing in-game balancing pass for mining cadence and fluid response constants.
+
+### Current WIP / known limitations
+- Standing on floating single-block entities can still feel unstable in some cases because entity pushback/collision handling is still being tuned.
+- Fluid-wave behavior is currently profile-driven in code; worldgen/data-driven wave metrics are planned but not finalized.
+- Multi-block structures (water and land) are planned but not implemented yet.
+- Mining and tool-speed balance is playable, but values are still under active tuning for closer vanilla feel.
+
