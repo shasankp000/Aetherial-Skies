@@ -29,6 +29,7 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvent;
+import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.util.ItemScatterer;
 import net.minecraft.util.Identifier;
 
@@ -234,10 +235,42 @@ public class GravityBlockEntity extends Entity {
         Vec3d velocity = this.getVelocity();
 
         if (!this.hasNoGravity()) {
-            velocity = velocity.add(0.0D, -profile.gravityAccel(), 0.0D);
+            boolean inWater = this.isTouchingWater();
+            boolean inLava = this.isInLava();
+            float waterDepth = (float) this.getFluidHeight(FluidTags.WATER);
+            float lavaDepth = (float) this.getFluidHeight(FluidTags.LAVA);
+            float fluidDepth = MathHelper.clamp(Math.max(waterDepth, lavaDepth), 0.0f, 1.0f);
+
+            if (inWater || inLava) {
+                // Relative-density model (extensible to multi-block ships via GravityData.composeHydrodynamics* APIs).
+                float fluidDensityScale = inLava ? 1.25f : 1.0f;
+                float effectiveRelativeDensity = profile.relativeDensity() / fluidDensityScale;
+
+                // Submersion-dependent buoyancy. < 0 => upward acceleration (float), > 0 => sinking.
+                float displacementTerm = fluidDepth * profile.displacedVolume();
+                float netSpecificGravity = effectiveRelativeDensity - displacementTerm - (profile.buoyancyAssist() * fluidDepth);
+                float netGravity = profile.gravityAccel() * netSpecificGravity;
+
+                velocity = velocity.add(0.0D, -netGravity, 0.0D);
+
+                // Fluids damp linear motion much more than air.
+                double horizontalFluidDrag = MathHelper.clamp(0.86f - (fluidDepth * 0.10f), 0.62f, 0.90f);
+                double verticalFluidDrag = MathHelper.clamp(0.88f - (fluidDepth * 0.14f), 0.58f, 0.92f);
+                velocity = new Vec3d(velocity.x * horizontalFluidDrag, velocity.y * verticalFluidDrag, velocity.z * horizontalFluidDrag);
+
+                // Avoid runaway upward acceleration while still allowing float-up for very light blocks.
+                if (velocity.y > 0.12D) {
+                    velocity = new Vec3d(velocity.x, 0.12D, velocity.z);
+                }
+            } else {
+                velocity = velocity.add(0.0D, -profile.gravityAccel(), 0.0D);
+            }
         }
+
         double drag = MathHelper.clamp(1.0f - profile.airDrag(), 0.90f, 0.995f);
-        velocity = new Vec3d(velocity.x * drag, velocity.y, velocity.z * drag);
+        if (!this.isTouchingWater() && !this.isInLava()) {
+            velocity = new Vec3d(velocity.x * drag, velocity.y, velocity.z * drag);
+        }
         this.setVelocity(velocity);
         this.move(MovementType.SELF, this.getVelocity());
 
@@ -362,6 +395,10 @@ public class GravityBlockEntity extends Entity {
         this.getDataTracker().set(ROLL, this.roll);
 
         float angularDamping = MathHelper.clamp(1.0f - profile.angularDrag(), 0.88f, 0.995f);
+        if (this.isTouchingWater() || this.isInLava()) {
+            // Rotational inertia bleeds faster in fluids.
+            angularDamping *= this.isInLava() ? 0.72f : 0.82f;
+        }
         this.angularVelocity *= angularDamping;
         this.pitchAngularVelocity *= angularDamping;
         this.rollAngularVelocity *= angularDamping;
