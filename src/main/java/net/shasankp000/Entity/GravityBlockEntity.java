@@ -123,8 +123,14 @@ public class GravityBlockEntity extends Entity {
     private static final TrackedData<Float> PLAYER_LOAD =
             DataTracker.registerData(GravityBlockEntity.class, TrackedDataHandlerRegistry.FLOAT);
 
+    private static final int PLAYER_LOAD_SAMPLE_INTERVAL = 4;
+    private static final int TELEMETRY_UPDATE_INTERVAL = 2;
+
     private float smoothedPlayerLoad = 0.0f;
     private float lastWaveMetric = 0.0f;
+    private float cachedPlayerLoadTarget = 0.0f;
+    private int nextPlayerLoadSampleAge = 0;
+    private int nextStackShearImpulseAge = 0;
 
     // Constructor for entity creation
     public GravityBlockEntity(EntityType<?> type, World world) {
@@ -262,7 +268,7 @@ public class GravityBlockEntity extends Entity {
                 float effectiveRelativeDensity = profile.relativeDensity() / fluidDensityScale;
 
                 GravityData.WaveProfile waveProfile = GravityData.getWaveProfile(this.getWorld(), this.getBlockPos());
-                float playerLoadTarget = this.computePlayerLoadTarget();
+                float playerLoadTarget = this.getSampledPlayerLoadTarget();
                 // Smooth restoration when players step off instead of snapping instantly.
                 this.smoothedPlayerLoad = MathHelper.lerp(0.12f, this.smoothedPlayerLoad, playerLoadTarget);
                 if (this.smoothedPlayerLoad < 0.001f) {
@@ -278,6 +284,7 @@ public class GravityBlockEntity extends Entity {
 
                 velocity = velocity.add(0.0D, -netGravity, 0.0D);
                 velocity = this.applyFluidWaveForces(velocity, waveProfile, fluidDepth, effectiveRelativeDensity, inLava);
+                velocity = this.applyStackedFluidInteractions(velocity, fluidDepth, mass);
 
                 // Fluids damp linear motion much more than air.
                 double horizontalFluidDrag = MathHelper.clamp(0.86f - (fluidDepth * 0.10f), 0.62f, 0.90f);
@@ -298,6 +305,20 @@ public class GravityBlockEntity extends Entity {
                 this.smoothedPlayerLoad = MathHelper.lerp(0.10f, this.smoothedPlayerLoad, 0.0f);
                 this.lastWaveMetric = 0.0f;
                 velocity = velocity.add(0.0D, -profile.gravityAccel(), 0.0D);
+
+                // Drive angular velocity from horizontal motion during freefall.
+                // Heavier blocks (higher mass) tumble less than lighter ones.
+                double horizontalSpeed = velocity.horizontalLength();
+                if (!this.isOnGround() && landingTimer == 0) {
+                    float tumbleFactor = MathHelper.clamp(
+                            (float) (horizontalSpeed * 2.5f) / mass,
+                            0.0f,
+                            2.5f
+                    );
+                    angularVelocity += tumbleFactor;
+                    // Add a randomized pitch component so tumble is not purely yaw.
+                    pitchAngularVelocity += tumbleFactor * 0.4f * (this.random.nextBoolean() ? 1f : -1f);
+                }
             }
         }
 
@@ -323,6 +344,10 @@ public class GravityBlockEntity extends Entity {
     }
 
     private void updateRenderTelemetry() {
+        if ((this.age % TELEMETRY_UPDATE_INTERVAL) != 0) {
+            return;
+        }
+
         Vec3d velocity = this.getVelocity();
         float verticalSpeed = (float) velocity.y;
         float horizontalSpeed = (float) velocity.horizontalLength();
@@ -344,6 +369,15 @@ public class GravityBlockEntity extends Entity {
         this.getDataTracker().set(IMPACT_AMPLITUDE, impact);
         this.getDataTracker().set(WAVE_METRIC, this.lastWaveMetric);
         this.getDataTracker().set(PLAYER_LOAD, this.smoothedPlayerLoad);
+    }
+
+    private float getSampledPlayerLoadTarget() {
+        if (this.age >= this.nextPlayerLoadSampleAge) {
+            this.cachedPlayerLoadTarget = this.computePlayerLoadTarget();
+            // Stagger entity sampling to avoid all floating blocks querying players on the same tick.
+            this.nextPlayerLoadSampleAge = this.age + PLAYER_LOAD_SAMPLE_INTERVAL + (this.getId() & 1);
+        }
+        return this.cachedPlayerLoadTarget;
     }
 
     private Vec3d applyFluidWaveForces(Vec3d velocity, GravityData.WaveProfile waveProfile, float fluidDepth, float effectiveRelativeDensity, boolean inLava) {
@@ -379,19 +413,115 @@ public class GravityBlockEntity extends Entity {
                 player -> !player.isSpectator() && player.getBoundingBox().minY >= this.getBoundingBox().maxY - 0.03D
         );
 
-        if (players.isEmpty()) {
-            return 0.0f;
-        }
-
         float massProxyTotal = 0.0f;
         for (PlayerEntity player : players) {
             massProxyTotal += this.estimatePlayerMassProxy(player);
         }
 
-        // Option C hybrid: combine count and mass proxies with clamping for stability.
+        // Option C hybrid (players): combine count and mass proxies with clamping for stability.
         float countTerm = Math.min(0.32f, players.size() * 0.10f);
         float massTerm = Math.min(0.35f, massProxyTotal * 0.12f);
-        return MathHelper.clamp((countTerm * 0.55f) + (massTerm * 0.45f), 0.0f, 0.65f);
+
+        // Additional support load from stacked gravity blocks standing on this block.
+        List<GravityBlockEntity> stackedBlocks = this.getStackedBlocksAbove();
+
+        float stackedMassProxy = 0.0f;
+        for (GravityBlockEntity stacked : stackedBlocks) {
+            float stackedMass = Math.max(0.5f, GravityData.getProfile(stacked.getBlockState().getBlock()).mass());
+            // Dampen raw mass to keep buoyancy response stable while still making heavy-on-light stacks sink.
+            stackedMassProxy += MathHelper.clamp(stackedMass * 0.58f, 0.30f, 1.60f);
+        }
+
+        float stackedCountTerm = Math.min(0.40f, stackedBlocks.size() * 0.16f);
+        float stackedMassTerm = Math.min(0.72f, stackedMassProxy * 0.26f);
+        float playerLoad = (countTerm * 0.55f) + (massTerm * 0.45f);
+        float stackedLoad = (stackedCountTerm * 0.40f) + (stackedMassTerm * 0.60f);
+        return MathHelper.clamp(playerLoad + stackedLoad, 0.0f, 1.25f);
+    }
+
+    private List<GravityBlockEntity> getStackedBlocksAbove() {
+        Box thisBox = this.getBoundingBox();
+        Box stackedBand = thisBox
+                .expand(-0.04D, 0.0D, -0.04D)
+                .stretch(0.0D, 1.10D, 0.0D)
+                .offset(0.0D, 0.02D, 0.0D);
+
+        return this.getWorld().getEntitiesByClass(
+                GravityBlockEntity.class,
+                stackedBand,
+                block -> this.isStackedOnTop(block, thisBox)
+        );
+    }
+
+    private boolean isStackedOnTop(GravityBlockEntity block, Box thisBox) {
+        if (block == this) {
+            return false;
+        }
+        Box otherBox = block.getBoundingBox();
+
+        double verticalOffset = otherBox.minY - thisBox.maxY;
+        if (verticalOffset < -0.32D || verticalOffset > 0.72D) {
+            return false;
+        }
+
+        // Face-to-face stacked contacts can "touch" without strict AABB intersection.
+        double overlapEpsilon = 0.04D;
+        boolean overlapsX = otherBox.maxX >= thisBox.minX + overlapEpsilon && otherBox.minX <= thisBox.maxX - overlapEpsilon;
+        boolean overlapsZ = otherBox.maxZ >= thisBox.minZ + overlapEpsilon && otherBox.minZ <= thisBox.maxZ - overlapEpsilon;
+        if (!overlapsX || !overlapsZ) {
+            return false;
+        }
+
+        return block.getX() >= thisBox.minX - 0.10D
+                && block.getX() <= thisBox.maxX + 0.10D
+                && block.getZ() >= thisBox.minZ - 0.10D
+                && block.getZ() <= thisBox.maxZ + 0.10D;
+    }
+
+    private Vec3d applyStackedFluidInteractions(Vec3d velocity, float fluidDepth, float selfMass) {
+        if (fluidDepth <= 0.0f || (this.age % 2) != 0) {
+            return velocity;
+        }
+
+        List<GravityBlockEntity> stackedBlocks = this.getStackedBlocksAbove();
+        if (stackedBlocks.isEmpty()) {
+            return velocity;
+        }
+
+        float totalStackMass = 0.0f;
+        for (GravityBlockEntity stacked : stackedBlocks) {
+            totalStackMass += Math.max(0.5f, GravityData.getProfile(stacked.getBlockState().getBlock()).mass());
+        }
+
+        // Additional downward pull so heavy-on-light stacks do not remain unrealistically static.
+        double stackedDownforce = MathHelper.clamp(totalStackMass * 0.022f * fluidDepth, 0.0f, 0.22f);
+        Vec3d adjusted = velocity.add(0.0D, -stackedDownforce, 0.0D);
+
+        for (GravityBlockEntity stacked : stackedBlocks) {
+            float stackedMass = Math.max(0.5f, GravityData.getProfile(stacked.getBlockState().getBlock()).mass());
+            if (stackedMass <= (selfMass * 1.05f)) {
+                continue;
+            }
+
+            double dx = stacked.getX() - this.getX();
+            double dz = stacked.getZ() - this.getZ();
+            double d = Math.sqrt((dx * dx) + (dz * dz));
+            if (d < 1.0E-4D) {
+                // Deterministic fallback direction so perfectly centered stacks can still shear.
+                double phase = (this.age * 0.31D) + (this.getId() * 0.17D);
+                dx = Math.cos(phase);
+                dz = Math.sin(phase);
+                d = 1.0D;
+            }
+            dx /= d;
+            dz /= d;
+
+            double shear = MathHelper.clamp((stackedMass - selfMass) * 0.010f * fluidDepth, 0.0035f, 0.028f);
+            stacked.addVelocity(dx * shear, 0.0D, dz * shear);
+            this.addVelocity(-dx * shear * 0.25D, 0.0D, -dz * shear * 0.25D);
+        }
+
+        return adjusted;
     }
 
     private float estimatePlayerMassProxy(PlayerEntity player) {
@@ -408,6 +538,40 @@ public class GravityBlockEntity extends Entity {
             proxy += 0.05f;
         }
         return proxy;
+    }
+
+    public boolean isTopSupportedPlayer(Entity candidate) {
+        if (!(candidate instanceof PlayerEntity other)) {
+            return false;
+        }
+
+        Box thisBox = this.getBoundingBox();
+        Box otherBox = other.getBoundingBox();
+        if (!thisBox.intersects(otherBox)) {
+            return false;
+        }
+
+        // Treat players as "standing on top" while their feet are near the top face,
+        // even with slight overlap from bobbing/latency.
+        double footOffsetFromTop = otherBox.minY - thisBox.maxY;
+        if (footOffsetFromTop < -0.30D || footOffsetFromTop > 0.30D) {
+            return false;
+        }
+
+        // Keep side collisions working: only exempt push if the player center is over the top plane.
+        boolean overTopPlane =
+                other.getX() >= thisBox.minX &&
+                other.getX() <= thisBox.maxX &&
+                other.getZ() >= thisBox.minZ &&
+                other.getZ() <= thisBox.maxZ;
+
+        if (!overTopPlane) {
+            return false;
+        }
+
+        boolean aboveBlockMidline = otherBox.maxY > thisBox.maxY + 0.10D;
+        boolean notStronglyAscending = other.getVelocity().y <= 0.16D;
+        return aboveBlockMidline && notStronglyAscending;
     }
 
     private Vec3d resolveCollisionResponse(Vec3d velocity, GravityData.PhysicsProfile profile, float mass) {
@@ -461,8 +625,18 @@ public class GravityBlockEntity extends Entity {
     }
 
     private Vec3d applyGroundFriction(Vec3d velocity, GravityData.PhysicsProfile profile, float mass) {
-        double retention = MathHelper.clamp(profile.groundFriction(), 0.40f, 0.90f);
+        // Invert friction feel: higher groundFriction values stop faster, lower values slide longer.
+        double retention = MathHelper.clamp(1.0f - (profile.groundFriction() * 0.55f), 0.35f, 0.72f);
         double staticCutoff = 0.018D * mass;
+        GravityBlockEntity support = this.findSupportingGravityBlockBelow();
+        if (support != null) {
+            boolean floatingSupport = support.isTouchingWater() || support.isInLava() || !support.isOnGround();
+            if (floatingSupport) {
+                // Entity-on-entity contact in fluid should not lock like ground friction.
+                retention = MathHelper.clamp(retention + 0.18D, 0.55D, 0.92D);
+                staticCutoff *= 0.35D;
+            }
+        }
 
         double velX = velocity.x * retention;
         double velZ = velocity.z * retention;
@@ -475,6 +649,87 @@ public class GravityBlockEntity extends Entity {
         }
 
         return new Vec3d(velX, velocity.y, velZ);
+    }
+
+    private GravityBlockEntity findSupportingGravityBlockBelow() {
+        Box thisBox = this.getBoundingBox();
+        Box probe = thisBox
+                .expand(-0.04D, 0.0D, -0.04D)
+                .stretch(0.0D, -0.22D, 0.0D)
+                .offset(0.0D, -0.02D, 0.0D);
+
+        List<GravityBlockEntity> supports = this.getWorld().getEntitiesByClass(
+                GravityBlockEntity.class,
+                probe,
+                block -> block != this && block.getBoundingBox().maxY <= thisBox.minY + 0.08D
+        );
+        return supports.isEmpty() ? null : supports.get(0);
+    }
+
+    private boolean applyFloatingStackShear(GravityBlockEntity other, Box thisBox, Box otherBox) {
+        boolean otherAboveThis = otherBox.minY >= thisBox.maxY - 0.06D;
+        boolean thisAboveOther = thisBox.minY >= otherBox.maxY - 0.06D;
+        if (!otherAboveThis && !thisAboveOther) {
+            return false;
+        }
+
+        GravityBlockEntity lower = otherAboveThis ? this : other;
+        GravityBlockEntity upper = otherAboveThis ? other : this;
+        boolean floatingStack = lower.isTouchingWater() || lower.isInLava() || !lower.isOnGround();
+        if (!floatingStack) {
+            // On land we keep stacks stable and avoid oscillation.
+            return true;
+        }
+
+        // Rate-limit stack shear impulses to prevent high-frequency rattle.
+        if (this.age < this.nextStackShearImpulseAge && other.age < other.nextStackShearImpulseAge) {
+            return true;
+        }
+
+        float lowerMass = Math.max(0.5f, GravityData.getProfile(lower.getBlockState().getBlock()).mass());
+        float upperMass = Math.max(0.5f, GravityData.getProfile(upper.getBlockState().getBlock()).mass());
+        float massExcess = upperMass - (lowerMass * 0.95f);
+        if (massExcess <= 0.0f) {
+            return true;
+        }
+
+        double dx = upper.getX() - lower.getX();
+        double dz = upper.getZ() - lower.getZ();
+        double distance = Math.sqrt((dx * dx) + (dz * dz));
+        if (distance < 1.0E-4D) {
+            double phase = (this.getWorld().getTime() * 0.41D) + (upper.getId() * 0.13D);
+            dx = Math.cos(phase);
+            dz = Math.sin(phase);
+            distance = 1.0D;
+        }
+        dx /= distance;
+        dz /= distance;
+
+        float waveMetric = Math.max(lower.lastWaveMetric, upper.lastWaveMetric);
+        double shear = MathHelper.clamp((massExcess * 0.013f) + (waveMetric * 0.004f), 0.0025f, 0.032f);
+        Vec3d relativeVelocity = upper.getVelocity().subtract(lower.getVelocity());
+        double relativeHorizontalSpeed = Math.sqrt((relativeVelocity.x * relativeVelocity.x) + (relativeVelocity.z * relativeVelocity.z));
+        // If stack is already separating laterally, reduce extra impulse to avoid chatter.
+        shear *= MathHelper.clamp(1.0D - (relativeHorizontalSpeed * 10.0D), 0.35D, 1.0D);
+        upper.addVelocity(dx * shear, 0.0D, dz * shear);
+        lower.addVelocity(-dx * shear * 0.22D, 0.0D, -dz * shear * 0.22D);
+        upper.nextStackShearImpulseAge = upper.age + 2;
+        lower.nextStackShearImpulseAge = lower.age + 2;
+
+        // Extra load transfer so heavy-on-light stacks do not appear glued at the surface.
+        double centerDistance = Math.sqrt(((upper.getX() - lower.getX()) * (upper.getX() - lower.getX())) + ((upper.getZ() - lower.getZ()) * (upper.getZ() - lower.getZ())));
+        double centerBias = MathHelper.clamp(1.0D - centerDistance, 0.0D, 1.0D);
+        double compressionDownforce = MathHelper.clamp((massExcess * 0.012f) + (centerBias * 0.015f), 0.0f, 0.065f);
+        lower.addVelocity(0.0D, -compressionDownforce, 0.0D);
+        upper.addVelocity(0.0D, -compressionDownforce * 0.35D, 0.0D);
+
+        // Dampen vertical relative oscillation so stacked blocks don't "chatter" in place.
+        double relativeVerticalSpeed = upper.getVelocity().y - lower.getVelocity().y;
+        if (Math.abs(relativeVerticalSpeed) > 0.01D) {
+            upper.addVelocity(0.0D, -relativeVerticalSpeed * 0.24D, 0.0D);
+            lower.addVelocity(0.0D, relativeVerticalSpeed * 0.12D, 0.0D);
+        }
+        return true;
     }
 
     private void updateAngularMotion(GravityData.PhysicsProfile profile, float mass) {
@@ -534,7 +789,17 @@ public class GravityBlockEntity extends Entity {
                 if (!this.getBoundingBox().intersects(other.getBoundingBox())) {
                     return;
                 }
+                if (other instanceof GravityBlockEntity) {
+                    Box thisBox = this.getBoundingBox();
+                    Box otherBox = other.getBoundingBox();
+                    if (this.applyFloatingStackShear((GravityBlockEntity) other, thisBox, otherBox)) {
+                        return;
+                    }
+                }
                 if (other.getBoundingBox().minY >= this.getBoundingBox().maxY - 0.02D) {
+                    return;
+                }
+                if (this.isTopSupportedPlayer(other)) {
                     return;
                 }
 
@@ -573,7 +838,9 @@ public class GravityBlockEntity extends Entity {
 
     @Override
     public void onPlayerCollision(PlayerEntity player) {
-        // simply call pushAwayFrom(player)
+        if (this.isTopSupportedPlayer(player)) {
+            return;
+        }
         this.pushAwayFrom(player);
     }
 

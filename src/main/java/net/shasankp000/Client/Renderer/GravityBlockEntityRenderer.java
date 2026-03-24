@@ -109,27 +109,16 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
         BlockPos pos = renderPos;
         var world = entity.getWorld();
         var model = this.blockRenderManager.getModel(stateToRender);
-//        System.out.println("Baked model " + model);
-        var vertexConsumer = vertexConsumers.getBuffer(RenderLayers.getMovingBlockLayer(stateToRender));
+        int overlay = OverlayTexture.DEFAULT_UV;
 
+        // Use the "entity" block render path to avoid world-face AO shading artifacts
+        // when the block is rendered with arbitrary yaw/pitch/roll.
+        this.blockRenderManager.renderBlockAsEntity(stateToRender, matrices, vertexConsumers, light, overlay);
+
+        BlockModelRenderer renderer = this.blockRenderManager.getModelRenderer();
         boolean cull = false;
         var random = world.getRandom();
         long seed = stateToRender.getRenderingSeed(pos);
-        int overlay = OverlayTexture.DEFAULT_UV;
-
-        BlockModelRenderer renderer = this.blockRenderManager.getModelRenderer();
-        renderer.render(
-                world,
-                model,
-                stateToRender,
-                pos,
-                matrices,
-                vertexConsumer,
-                cull,
-                random,
-                seed,
-                overlay
-        );
 
         float normalizedProgress = MathHelper.clamp(miningProgress / MINING_THRESHOLD, 0.0f, 1.0f);
         int stage = MathHelper.clamp((int) (normalizedProgress * 10.0f) - 1, -1, 9);

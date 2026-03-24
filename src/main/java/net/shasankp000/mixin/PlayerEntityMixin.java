@@ -32,4 +32,3 @@ public abstract class PlayerEntityMixin {
         ci.cancel();
     }
 }
-

@@ -70,6 +70,12 @@ public class AetherialSkies implements ModInitializer {
 						gravityBlockEntity.setBlockState(state); // preserve exact block state for sync and rendering.
 						gravityBlockEntity.setWeight(weight);
 						gravityBlockEntity.refreshPositionAndAngles(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, 0, 0);
+						// Give a tiny horizontal nudge so freefall tumble starts immediately.
+						gravityBlockEntity.setVelocity(
+								(server.getOverworld().getRandom().nextFloat() - 0.5f) * 0.08f,
+								0.0,
+								(server.getOverworld().getRandom().nextFloat() - 0.5f) * 0.08f
+						);
 
 						Objects.requireNonNull(server.getWorld(worldRegistryKey)).spawnEntity(gravityBlockEntity);
 						toRemove.add(pos);
