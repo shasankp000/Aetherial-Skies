@@ -127,3 +127,4 @@ public class ShipBoatEntity extends BoatEntity {
         super.remove(reason);
     }
 }
+

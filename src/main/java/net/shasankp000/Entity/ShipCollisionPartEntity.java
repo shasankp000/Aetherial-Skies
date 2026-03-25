@@ -22,9 +22,16 @@ public class ShipCollisionPartEntity extends Entity {
             DataTracker.registerData(ShipCollisionPartEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> TRACKED_LOCAL_Z =
             DataTracker.registerData(ShipCollisionPartEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> TRACKED_SIZE_X =
+            DataTracker.registerData(ShipCollisionPartEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> TRACKED_SIZE_Y =
+            DataTracker.registerData(ShipCollisionPartEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> TRACKED_SIZE_Z =
+            DataTracker.registerData(ShipCollisionPartEntity.class, TrackedDataHandlerRegistry.FLOAT);
 
     private UUID ownerShipId = null;
     private Vec3d localOffset = Vec3d.ZERO;
+    private Vec3d halfSize = new Vec3d(0.5D, 0.5D, 0.5D);
 
     public ShipCollisionPartEntity(EntityType<? extends ShipCollisionPartEntity> type, World world) {
         super(type, world);
@@ -38,15 +45,22 @@ public class ShipCollisionPartEntity extends Entity {
         this.dataTracker.startTracking(TRACKED_LOCAL_X, 0.0f);
         this.dataTracker.startTracking(TRACKED_LOCAL_Y, 0.0f);
         this.dataTracker.startTracking(TRACKED_LOCAL_Z, 0.0f);
+        this.dataTracker.startTracking(TRACKED_SIZE_X, 1.0f);
+        this.dataTracker.startTracking(TRACKED_SIZE_Y, 1.0f);
+        this.dataTracker.startTracking(TRACKED_SIZE_Z, 1.0f);
     }
 
-    public void linkTo(UUID shipId, Vec3d offset) {
+    public void linkTo(UUID shipId, Vec3d offset, Vec3d size) {
         this.ownerShipId = shipId;
         this.localOffset = offset;
+        this.halfSize = new Vec3d(size.x * 0.5D, size.y * 0.5D, size.z * 0.5D);
         this.getDataTracker().set(TRACKED_OWNER_SHIP_ID, shipId.toString());
         this.getDataTracker().set(TRACKED_LOCAL_X, (float) offset.x);
         this.getDataTracker().set(TRACKED_LOCAL_Y, (float) offset.y);
         this.getDataTracker().set(TRACKED_LOCAL_Z, (float) offset.z);
+        this.getDataTracker().set(TRACKED_SIZE_X, (float) size.x);
+        this.getDataTracker().set(TRACKED_SIZE_Y, (float) size.y);
+        this.getDataTracker().set(TRACKED_SIZE_Z, (float) size.z);
     }
 
     public UUID getOwnerShipId() {
@@ -74,6 +88,14 @@ public class ShipCollisionPartEntity extends Entity {
                     this.getDataTracker().get(TRACKED_LOCAL_X),
                     this.getDataTracker().get(TRACKED_LOCAL_Y),
                     this.getDataTracker().get(TRACKED_LOCAL_Z)
+            );
+            return;
+        }
+        if (TRACKED_SIZE_X.equals(data) || TRACKED_SIZE_Y.equals(data) || TRACKED_SIZE_Z.equals(data)) {
+            halfSize = new Vec3d(
+                    this.getDataTracker().get(TRACKED_SIZE_X) * 0.5D,
+                    this.getDataTracker().get(TRACKED_SIZE_Y) * 0.5D,
+                    this.getDataTracker().get(TRACKED_SIZE_Z) * 0.5D
             );
         }
     }
@@ -111,7 +133,14 @@ public class ShipCollisionPartEntity extends Entity {
         double centerZ = ship.getZ() + rotatedZ;
         this.setPosition(centerX, centerY, centerZ);
         this.setYaw(ship.getYaw());
-        this.setBoundingBox(new Box(centerX - 0.5D, centerY, centerZ - 0.5D, centerX + 0.5D, centerY + 1.0D, centerZ + 0.5D));
+        this.setBoundingBox(new Box(
+                centerX - halfSize.x,
+                centerY - halfSize.y,
+                centerZ - halfSize.z,
+                centerX + halfSize.x,
+                centerY + halfSize.y,
+                centerZ + halfSize.z
+        ));
     }
 
     @Override
@@ -124,12 +153,21 @@ public class ShipCollisionPartEntity extends Entity {
                 nbt.getDouble("LocalY"),
                 nbt.getDouble("LocalZ")
         );
+        Vec3d size = new Vec3d(
+                nbt.contains("SizeX", 6) ? nbt.getDouble("SizeX") : 1.0D,
+                nbt.contains("SizeY", 6) ? nbt.getDouble("SizeY") : 1.0D,
+                nbt.contains("SizeZ", 6) ? nbt.getDouble("SizeZ") : 1.0D
+        );
+        halfSize = new Vec3d(size.x * 0.5D, size.y * 0.5D, size.z * 0.5D);
         if (ownerShipId != null) {
             this.getDataTracker().set(TRACKED_OWNER_SHIP_ID, ownerShipId.toString());
         }
         this.getDataTracker().set(TRACKED_LOCAL_X, (float) localOffset.x);
         this.getDataTracker().set(TRACKED_LOCAL_Y, (float) localOffset.y);
         this.getDataTracker().set(TRACKED_LOCAL_Z, (float) localOffset.z);
+        this.getDataTracker().set(TRACKED_SIZE_X, (float) size.x);
+        this.getDataTracker().set(TRACKED_SIZE_Y, (float) size.y);
+        this.getDataTracker().set(TRACKED_SIZE_Z, (float) size.z);
     }
 
     @Override
@@ -140,11 +178,14 @@ public class ShipCollisionPartEntity extends Entity {
         nbt.putDouble("LocalX", localOffset.x);
         nbt.putDouble("LocalY", localOffset.y);
         nbt.putDouble("LocalZ", localOffset.z);
+        nbt.putDouble("SizeX", halfSize.x * 2.0D);
+        nbt.putDouble("SizeY", halfSize.y * 2.0D);
+        nbt.putDouble("SizeZ", halfSize.z * 2.0D);
     }
 
     @Override
     public boolean isPushable() {
-        return true;
+        return false;
     }
 
     @Override
@@ -165,4 +206,3 @@ public class ShipCollisionPartEntity extends Entity {
         return super.collidesWith(other);
     }
 }
-
