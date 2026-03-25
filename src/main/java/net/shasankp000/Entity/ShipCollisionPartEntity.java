@@ -247,8 +247,11 @@ public class ShipCollisionPartEntity extends Entity {
 
     @Override
     public boolean collidesWith(Entity other) {
-        if (other instanceof ShipBoatEntity || other instanceof ShipCollisionPartEntity) {
-            return false;
+        if (other instanceof ShipBoatEntity ship) {
+            return !(ownerShipId != null && ownerShipId.equals(ship.getShipId()));
+        }
+        if (other instanceof ShipCollisionPartEntity otherPart) {
+            return !(ownerShipId != null && ownerShipId.equals(otherPart.getOwnerShipId()));
         }
         return super.collidesWith(other);
     }

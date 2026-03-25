@@ -3,6 +3,7 @@ package net.shasankp000.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EntityDimensions;
 import net.minecraft.entity.EntityPose;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
@@ -116,13 +117,21 @@ public class ShipBoatEntity extends BoatEntity {
         ShipHullData.HullBounds bounds = hull.computeBounds();
         cachedBounds = bounds;
 
-        float diagonal = (float) Math.sqrt(
-                bounds.widthX() * bounds.widthX() + bounds.widthZ() * bounds.widthZ()
-        );
-        // Keep ship body collision thin so players stand on hull collision parts, not on an oversized boat AABB cap.
-        cachedDimensions = EntityDimensions.changing(Math.max(1.375f, diagonal), 0.5625f);
+        // Keep ship core collider at vanilla size so it cannot block itself against its own collision parts.
+        cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
         waterlineOffset = 0.0f;
         this.calculateDimensions();
+    }
+
+    @Override
+    public boolean collidesWith(Entity other) {
+        if (other instanceof ShipCollisionPartEntity part) {
+            UUID partOwner = part.getOwnerShipId();
+            if (partOwner != null && partOwner.equals(this.shipId)) {
+                return false;
+            }
+        }
+        return super.collidesWith(other);
     }
 
     @Override
