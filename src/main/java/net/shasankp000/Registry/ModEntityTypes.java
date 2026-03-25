@@ -29,9 +29,9 @@ public final class ModEntityTypes {
                     Registries.ENTITY_TYPE,
                     new Identifier(AetherialSkies.MOD_ID, "ship_boat"),
                     FabricEntityTypeBuilder.<ShipBoatEntity>create(SpawnGroup.MISC, ShipBoatEntity::new)
-                            .dimensions(EntityDimensions.fixed(1.375f, 0.5625f))
+                            .dimensions(EntityDimensions.changing(1.375f, 0.5625f))
                             .trackRangeBlocks(128)
-                            .trackedUpdateRate(10)
+                            .trackedUpdateRate(3)
                             .build()
             );
 

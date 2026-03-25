@@ -30,6 +30,12 @@ public class ShipBoatEntityRenderer extends EntityRenderer<ShipBoatEntity> {
             return;
         }
 
+        ShipHullData.HullBounds bounds = hullData.computeBounds();
+        this.shadowRadius = (float) Math.max(
+                1.2D,
+                Math.sqrt(bounds.widthX() * bounds.widthX() + bounds.widthZ() * bounds.widthZ()) * 0.5D
+        );
+
         matrices.push();
         matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-entityYaw));
 

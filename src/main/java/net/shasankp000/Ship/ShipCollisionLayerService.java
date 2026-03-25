@@ -26,7 +26,8 @@ public final class ShipCollisionLayerService {
 
         removeLayer(world, ship.getShipId(), ship.getBoundingBox().expand(SEARCH_RADIUS));
         ShipHullData hullData = ship.getHullData();
-        for (LayerBox layerBox : mergeLayerBoxes(hullData)) {
+        List<LayerBox> layerBoxes = mergeLayerBoxes(hullData);
+        for (LayerBox layerBox : layerBoxes) {
             ShipCollisionPartEntity part = new ShipCollisionPartEntity(ModEntityTypes.SHIP_COLLISION_PART_ENTITY, world);
             part.linkTo(ship.getShipId(), layerBox.localCenter(), layerBox.size());
             part.refreshPositionAndAngles(ship.getX(), ship.getY(), ship.getZ(), ship.getYaw(), ship.getPitch());
@@ -48,7 +49,7 @@ public final class ShipCollisionLayerService {
                 searchBox,
                 part -> ship.getShipId().equals(part.getOwnerShipId())
         );
-        int expected = ship.getHullData().blocks().size();
+        int expected = mergeLayerBoxes(ship.getHullData()).size();
         if (existing.size() != expected) {
             rebuildLayer(ship);
         }
