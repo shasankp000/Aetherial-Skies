@@ -28,10 +28,14 @@ public class ShipBoatEntity extends BoatEntity {
 
     private UUID shipId = UUID.randomUUID();
     private NbtCompound hullTag = new NbtCompound();
+    private ShipHullData cachedHullData = null;
 
     private EntityDimensions cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
     private ShipHullData.HullBounds cachedBounds = null;
     private float waterlineOffset = 0.0f;
+    private int cachedLayerCount = -1;
+    private float cachedSubmersion = 0.0f;
+    private int submersionCheckCooldown = 0;
 
     public ShipBoatEntity(EntityType<? extends ShipBoatEntity> entityType, World world) {
         super(entityType, world);
@@ -51,18 +55,43 @@ public class ShipBoatEntity extends BoatEntity {
     }
 
     public ShipHullData getHullData() {
-        if (this.getWorld().isClient()) {
-            return ShipHullData.fromEntityTag(this.getDataTracker().get(TRACKED_HULL_TAG));
+        if (cachedHullData != null) {
+            return cachedHullData;
         }
-        return ShipHullData.fromEntityTag(hullTag);
+
+        NbtCompound tag = this.getWorld().isClient()
+                ? this.getDataTracker().get(TRACKED_HULL_TAG)
+                : hullTag;
+        cachedHullData = ShipHullData.fromEntityTag(tag);
+        return cachedHullData;
     }
 
     public void setHullData(ShipHullData hullData) {
         this.shipId = hullData.shipId();
+        this.cachedHullData = hullData;
         this.hullTag = hullData.toEntityTag();
         this.getDataTracker().set(TRACKED_SHIP_ID, this.shipId.toString());
         this.getDataTracker().set(TRACKED_HULL_TAG, this.hullTag.copy());
         recalculateDimensions();
+    }
+
+    public int getExpectedLayerCount() {
+        if (cachedLayerCount >= 0) {
+            return cachedLayerCount;
+        }
+
+        ShipHullData hull = getHullData();
+        if (hull.blocks().isEmpty()) {
+            cachedLayerCount = 0;
+            return 0;
+        }
+
+        java.util.HashSet<Integer> layers = new java.util.HashSet<>();
+        for (ShipCrateService.PackedBlock block : hull.blocks()) {
+            layers.add((int) Math.floor(block.localOffset().y));
+        }
+        cachedLayerCount = layers.size();
+        return cachedLayerCount;
     }
 
     @Override
@@ -71,6 +100,10 @@ public class ShipBoatEntity extends BoatEntity {
     }
 
     private void recalculateDimensions() {
+        cachedLayerCount = -1;
+        cachedSubmersion = 0.0f;
+        submersionCheckCooldown = 0;
+
         ShipHullData hull = getHullData();
         if (hull.blocks().isEmpty()) {
             cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
@@ -86,10 +119,9 @@ public class ShipBoatEntity extends BoatEntity {
         float diagonal = (float) Math.sqrt(
                 bounds.widthX() * bounds.widthX() + bounds.widthZ() * bounds.widthZ()
         );
-        float hullHeight = (float) Math.max(0.5625D, bounds.height());
-
-        cachedDimensions = EntityDimensions.changing(Math.max(1.375f, diagonal), hullHeight);
-        waterlineOffset = (float) (bounds.height() * 0.35D);
+        // Keep ship body collision thin so players stand on hull collision parts, not on an oversized boat AABB cap.
+        cachedDimensions = EntityDimensions.changing(Math.max(1.375f, diagonal), 0.5625f);
+        waterlineOffset = 0.0f;
         this.calculateDimensions();
     }
 
@@ -119,6 +151,7 @@ public class ShipBoatEntity extends BoatEntity {
         }
         if (TRACKED_HULL_TAG.equals(data)) {
             this.hullTag = this.getDataTracker().get(TRACKED_HULL_TAG).copy();
+            this.cachedHullData = null;
             recalculateDimensions();
         }
     }
@@ -147,6 +180,7 @@ public class ShipBoatEntity extends BoatEntity {
         } else {
             hullTag = new NbtCompound();
         }
+        this.cachedHullData = null;
         this.getDataTracker().set(TRACKED_SHIP_ID, shipId.toString());
         this.getDataTracker().set(TRACKED_HULL_TAG, hullTag.copy());
         recalculateDimensions();
@@ -162,20 +196,22 @@ public class ShipBoatEntity extends BoatEntity {
         float buoyancyAssist = hull.buoyancyAssist();
         float submersionRatio = calculateHullSubmersion();
 
-        double gravity = -0.04D;
         double buoyancyForce = 0.0D;
 
         if (submersionRatio > 0.0f) {
             float targetSubmersion = Math.min(0.9f, effectiveDensity);
             double displacement = submersionRatio - targetSubmersion;
-            buoyancyForce = displacement * 0.12D + buoyancyAssist * 0.05D;
+            // super.tick() already applies vanilla boat forces; this is a corrective hull bias, not a second gravity pass.
+            double restoring = displacement * 0.08D;
+            double assistLift = buoyancyAssist * 0.015D;
+            buoyancyForce = restoring + assistLift;
 
             Vec3d vel = this.getVelocity();
             this.setVelocity(vel.x * 0.9D, vel.y, vel.z * 0.9D);
         }
 
         Vec3d currentVel = this.getVelocity();
-        this.setVelocity(currentVel.x, currentVel.y + gravity + buoyancyForce, currentVel.z);
+        this.setVelocity(currentVel.x, currentVel.y + buoyancyForce, currentVel.z);
 
         Vec3d updated = this.getVelocity();
         if (Math.abs(updated.y) < 0.003D) {
@@ -186,12 +222,20 @@ public class ShipBoatEntity extends BoatEntity {
     }
 
     private float calculateHullSubmersion() {
+        if (submersionCheckCooldown > 0) {
+            submersionCheckCooldown--;
+            return cachedSubmersion;
+        }
+        submersionCheckCooldown = 3;
+
         if (cachedBounds == null) {
+            cachedSubmersion = 0.0f;
             return 0.0f;
         }
 
         ShipHullData hull = getHullData();
         if (hull.blocks().isEmpty()) {
+            cachedSubmersion = 0.0f;
             return 0.0f;
         }
 
@@ -214,7 +258,8 @@ public class ShipBoatEntity extends BoatEntity {
             }
         }
 
-        return (float) submergedBlocks / (float) totalBlocks;
+        cachedSubmersion = (float) submergedBlocks / (float) totalBlocks;
+        return cachedSubmersion;
     }
 
     @Override
@@ -262,8 +307,8 @@ public class ShipBoatEntity extends BoatEntity {
     @Override
     public void tick() {
         super.tick();
-        applyHullBuoyancy();
         if (!this.getWorld().isClient()) {
+            applyHullBuoyancy();
             ShipCollisionLayerService.ensureLayer(this);
             clampToTerrain();
         }

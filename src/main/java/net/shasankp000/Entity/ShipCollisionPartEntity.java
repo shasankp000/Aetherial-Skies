@@ -32,6 +32,10 @@ public class ShipCollisionPartEntity extends Entity {
     private UUID ownerShipId = null;
     private Vec3d localOffset = Vec3d.ZERO;
     private Vec3d halfSize = new Vec3d(0.5D, 0.5D, 0.5D);
+    private ShipBoatEntity cachedOwner = null;
+    private int ownerEntityId = -1;
+    private int ownerSearchCooldown = 0;
+    private int missingOwnerTicks = 0;
 
     public ShipCollisionPartEntity(EntityType<? extends ShipCollisionPartEntity> type, World world) {
         super(type, world);
@@ -50,11 +54,15 @@ public class ShipCollisionPartEntity extends Entity {
         this.dataTracker.startTracking(TRACKED_SIZE_Z, 1.0f);
     }
 
-    public void linkTo(UUID shipId, Vec3d offset, Vec3d size) {
-        this.ownerShipId = shipId;
+    public void linkTo(ShipBoatEntity owner, Vec3d offset, Vec3d size) {
+        this.ownerShipId = owner.getShipId();
+        this.cachedOwner = owner;
+        this.ownerEntityId = owner.getId();
+        this.ownerSearchCooldown = 0;
+        this.missingOwnerTicks = 0;
         this.localOffset = offset;
         this.halfSize = new Vec3d(size.x * 0.5D, size.y * 0.5D, size.z * 0.5D);
-        this.getDataTracker().set(TRACKED_OWNER_SHIP_ID, shipId.toString());
+        this.getDataTracker().set(TRACKED_OWNER_SHIP_ID, ownerShipId.toString());
         this.getDataTracker().set(TRACKED_LOCAL_X, (float) offset.x);
         this.getDataTracker().set(TRACKED_LOCAL_Y, (float) offset.y);
         this.getDataTracker().set(TRACKED_LOCAL_Z, (float) offset.z);
@@ -111,17 +119,16 @@ public class ShipCollisionPartEntity extends Entity {
             return;
         }
 
-        List<ShipBoatEntity> owners = this.getWorld().getEntitiesByClass(
-                ShipBoatEntity.class,
-                this.getBoundingBox().expand(64.0D),
-                ship -> ownerShipId.equals(ship.getShipId())
-        );
-        if (owners.isEmpty()) {
-            this.discard();
+        ShipBoatEntity ship = resolveOwner();
+        if (ship == null) {
+            missingOwnerTicks++;
+            if (missingOwnerTicks > 120) {
+                this.discard();
+            }
             return;
         }
+        missingOwnerTicks = 0;
 
-        ShipBoatEntity ship = owners.get(0);
         double yawRad = Math.toRadians(-ship.getYaw());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
@@ -159,6 +166,10 @@ public class ShipCollisionPartEntity extends Entity {
                 nbt.contains("SizeZ", 6) ? nbt.getDouble("SizeZ") : 1.0D
         );
         halfSize = new Vec3d(size.x * 0.5D, size.y * 0.5D, size.z * 0.5D);
+        ownerEntityId = nbt.contains("OwnerEntityId", 3) ? nbt.getInt("OwnerEntityId") : -1;
+        cachedOwner = null;
+        ownerSearchCooldown = 0;
+        missingOwnerTicks = 0;
         if (ownerShipId != null) {
             this.getDataTracker().set(TRACKED_OWNER_SHIP_ID, ownerShipId.toString());
         }
@@ -181,6 +192,42 @@ public class ShipCollisionPartEntity extends Entity {
         nbt.putDouble("SizeX", halfSize.x * 2.0D);
         nbt.putDouble("SizeY", halfSize.y * 2.0D);
         nbt.putDouble("SizeZ", halfSize.z * 2.0D);
+        if (ownerEntityId >= 0) {
+            nbt.putInt("OwnerEntityId", ownerEntityId);
+        }
+    }
+
+    private ShipBoatEntity resolveOwner() {
+        if (cachedOwner != null && !cachedOwner.isRemoved() && ownerShipId != null && ownerShipId.equals(cachedOwner.getShipId())) {
+            return cachedOwner;
+        }
+
+        if (ownerEntityId >= 0) {
+            Entity entity = this.getWorld().getEntityById(ownerEntityId);
+            if (entity instanceof ShipBoatEntity ship && ownerShipId != null && ownerShipId.equals(ship.getShipId()) && !ship.isRemoved()) {
+                cachedOwner = ship;
+                return ship;
+            }
+        }
+
+        if (ownerSearchCooldown > 0) {
+            ownerSearchCooldown--;
+            return null;
+        }
+        ownerSearchCooldown = 40;
+
+        List<ShipBoatEntity> owners = this.getWorld().getEntitiesByClass(
+                ShipBoatEntity.class,
+                this.getBoundingBox().expand(64.0D),
+                ship -> ownerShipId != null && ownerShipId.equals(ship.getShipId())
+        );
+        if (owners.isEmpty()) {
+            return null;
+        }
+
+        cachedOwner = owners.get(0);
+        ownerEntityId = cachedOwner.getId();
+        return cachedOwner;
     }
 
     @Override
