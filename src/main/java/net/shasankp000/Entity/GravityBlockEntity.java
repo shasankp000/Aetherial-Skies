@@ -41,6 +41,7 @@ import net.shasankp000.Util.ToolStrength;
 
 
 import java.util.List;
+import java.util.UUID;
 
 
 import static net.minecraft.util.math.MathHelper.lerp;
@@ -131,6 +132,8 @@ public class GravityBlockEntity extends Entity {
     private float cachedPlayerLoadTarget = 0.0f;
     private int nextPlayerLoadSampleAge = 0;
     private int nextStackShearImpulseAge = 0;
+    private boolean shipControlled = false;
+    private UUID linkedShipUuid = null;
 
     // Constructor for entity creation
     public GravityBlockEntity(EntityType<?> type, World world) {
@@ -242,6 +245,12 @@ public class GravityBlockEntity extends Entity {
 
         if (this.getWorld().isClient) {
             return; // only process physics on the server.
+        }
+
+        if (this.shipControlled) {
+            this.setVelocity(Vec3d.ZERO);
+            this.updateRenderTelemetry();
+            return;
         }
 
         // Vanilla-like regression: progress decays while not being actively mined.
@@ -789,6 +798,16 @@ public class GravityBlockEntity extends Entity {
                 if (!this.getBoundingBox().intersects(other.getBoundingBox())) {
                     return;
                 }
+                if (this.shipControlled && other instanceof PlayerEntity) {
+                    return;
+                }
+                if (this.shipControlled && other instanceof GravityBlockEntity otherBlock) {
+                    UUID thisShip = this.linkedShipUuid;
+                    UUID otherShip = otherBlock.getLinkedShipUuid();
+                    if (thisShip != null && thisShip.equals(otherShip)) {
+                        return;
+                    }
+                }
                 if (other instanceof GravityBlockEntity) {
                     Box thisBox = this.getBoundingBox();
                     Box otherBox = other.getBoundingBox();
@@ -1005,6 +1024,9 @@ public class GravityBlockEntity extends Entity {
         nbt.putDouble("Weight", this.weight);
         nbt.putInt("SettleTicks", this.settleTicks);
         nbt.putString("BlockId", this.getBlockIdString());
+        if (this.linkedShipUuid != null) {
+            nbt.putUuid("LinkedShipUuid", this.linkedShipUuid);
+        }
         if (this.blockState != null) {
             nbt.put("BlockState", NbtHelper.fromBlockState(this.blockState));
         }
@@ -1042,6 +1064,7 @@ public class GravityBlockEntity extends Entity {
         this.getDataTracker().set(SETTLE_PROGRESS, nbt.contains("SettleProgress") ? nbt.getFloat("SettleProgress") : 0.0f);
         this.smoothedPlayerLoad = nbt.contains("PlayerLoad") ? nbt.getFloat("PlayerLoad") : 0.0f;
         this.lastWaveMetric = nbt.contains("WaveMetric") ? nbt.getFloat("WaveMetric") : 0.0f;
+        this.linkedShipUuid = nbt.containsUuid("LinkedShipUuid") ? nbt.getUuid("LinkedShipUuid") : null;
         this.getDataTracker().set(WAVE_METRIC, this.lastWaveMetric);
         this.getDataTracker().set(PLAYER_LOAD, this.smoothedPlayerLoad);
     }
@@ -1096,5 +1119,43 @@ public class GravityBlockEntity extends Entity {
 
     public void setWeight(double weight) {
         this.weight = weight;
+    }
+
+    public void setShipControlledPosition(Vec3d targetPos) {
+        this.setShipControlledTransform(targetPos, this.getYaw());
+    }
+
+    public void setShipControlledTransform(Vec3d targetPos, float shipYaw) {
+        this.shipControlled = true;
+        this.setNoGravity(true);
+        this.setVelocity(Vec3d.ZERO);
+        this.angularVelocity = 0.0f;
+        this.pitchAngularVelocity = 0.0f;
+        this.rollAngularVelocity = 0.0f;
+        this.rotationAngle = 0.0f;
+        this.previousRotationAngle = 0.0f;
+        this.roll = 0.0f;
+        this.setRotation(shipYaw, 0.0f);
+        this.getDataTracker().set(ROTATION, 0.0f);
+        this.getDataTracker().set(PREVIOUS_ROTATION, 0.0f);
+        this.getDataTracker().set(ROLL, 0.0f);
+        this.setPosition(targetPos.x, targetPos.y, targetPos.z);
+    }
+
+    public void clearShipControl() {
+        this.shipControlled = false;
+        this.setNoGravity(false);
+    }
+
+    public void setLinkedShipUuid(UUID linkedShipUuid) {
+        this.linkedShipUuid = linkedShipUuid;
+    }
+
+    public UUID getLinkedShipUuid() {
+        return this.linkedShipUuid;
+    }
+
+    public boolean isShipControlled() {
+        return this.shipControlled;
     }
 }

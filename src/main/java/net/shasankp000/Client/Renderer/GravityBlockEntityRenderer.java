@@ -41,6 +41,7 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
         float age = entity.age + tickDelta;
         float renderYaw = entity.getYaw();
         float renderPitch = entity.getPitch();
+        boolean shipControlled = entity.isShipControlled();
         BlockPos renderPos = entity.getBlockPos();
 
         BlockState blockState = entity.getBlockState();
@@ -66,20 +67,32 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
         float airborneFactor = timerState > 0 ? 0.0f : 1.0f;
 
         // Airborne tilt follows motion; on impact we switch to damped wobble as the block settles.
-        float forwardTilt = MathHelper.clamp(-verticalSpeed * 6.0f, -14.0f, 14.0f) * airborneFactor * weightFactor;
-        float lateralTilt = MathHelper.clamp(horizontalSpeed * 26.0f, 0.0f, 11.0f) * airborneFactor * weightFactor;
+        float forwardTilt = 0.0f;
+        float lateralTilt = 0.0f;
+        float impactTilt = 0.0f;
+        float impactLift = 0.0f;
+        float squash = 1.0f;
+        float stretch = 1.0f;
 
-        float wobbleDecay = 1.0f - settleProgress;
-        float wobbleWave = (float) Math.sin((age * 0.8f) + (interpolatedRotation * 0.12f));
-        float impactTilt = wobbleWave * 8.0f * impactAmplitude * wobbleDecay * weightFactor;
-        float impactLift = Math.abs(wobbleWave) * 0.05f * impactAmplitude * wobbleDecay;
+        if (!shipControlled) {
+            forwardTilt = MathHelper.clamp(-verticalSpeed * 6.0f, -14.0f, 14.0f) * airborneFactor * weightFactor;
+            lateralTilt = MathHelper.clamp(horizontalSpeed * 26.0f, 0.0f, 11.0f) * airborneFactor * weightFactor;
 
-        float squash = 1.0f - (0.08f * impactAmplitude * wobbleDecay);
-        float stretch = 1.0f + (0.08f * impactAmplitude * wobbleDecay);
+            float wobbleDecay = 1.0f - settleProgress;
+            float wobbleWave = (float) Math.sin((age * 0.8f) + (interpolatedRotation * 0.12f));
+            impactTilt = wobbleWave * 8.0f * impactAmplitude * wobbleDecay * weightFactor;
+            impactLift = Math.abs(wobbleWave) * 0.05f * impactAmplitude * wobbleDecay;
+            squash = 1.0f - (0.08f * impactAmplitude * wobbleDecay);
+            stretch = 1.0f + (0.08f * impactAmplitude * wobbleDecay);
+        }
 
-        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(renderYaw + (interpolatedRotation * 0.15f)));
-        matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees(renderPitch + forwardTilt + impactTilt));
-        matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees(roll + lateralTilt - (impactTilt * 0.5f)));
+        float yawForRender = shipControlled ? renderYaw : (renderYaw + (interpolatedRotation * 0.15f));
+        float pitchForRender = shipControlled ? 0.0f : (renderPitch + forwardTilt + impactTilt);
+        float rollForRender = shipControlled ? 0.0f : (roll + lateralTilt - (impactTilt * 0.5f));
+
+        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(yawForRender));
+        matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees(pitchForRender));
+        matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees(rollForRender));
 
 
 
@@ -99,7 +112,7 @@ public class GravityBlockEntityRenderer extends EntityRenderer<GravityBlockEntit
         // Move upward by the offset.
         matrices.translate(0, verticalOffset + impactLift, 0);
 
-        if (timerState > 0) {
+        if (!shipControlled && timerState > 0) {
             // Keep the compressed model visually grounded while scaling during impact.
             matrices.translate(0.0, (1.0f - squash) * 0.5f, 0.0);
             matrices.scale(stretch, squash, stretch);
