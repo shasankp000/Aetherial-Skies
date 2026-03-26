@@ -40,7 +40,7 @@ public class ShipCollisionPartEntity extends Entity {
 
     public ShipCollisionPartEntity(EntityType<? extends ShipCollisionPartEntity> type, World world) {
         super(type, world);
-        this.noClip = false;
+        this.noClip = true;
         this.setNoGravity(true);
     }
 
@@ -116,7 +116,8 @@ public class ShipCollisionPartEntity extends Entity {
 
     @Override
     public void tick() {
-        super.tick();
+        // Skip vanilla entity tick work; this entity is manually positioned each tick.
+        this.age++;
         if (this.getWorld().isClient()) {
             return;
         }
@@ -268,5 +269,19 @@ public class ShipCollisionPartEntity extends Entity {
     @Override
     public boolean isCollidable() {
         return true;
+    }
+
+    @Override
+    public boolean isPushable() {
+        return false;
+    }
+
+    @Override
+    public void pushAwayFrom(Entity entity) {
+        // Collision part should never push anything.
+    }
+
+    protected void pushAway(Entity entity) {
+        // Collision part should never be part of push resolution.
     }
 }

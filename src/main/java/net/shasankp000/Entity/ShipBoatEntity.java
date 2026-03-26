@@ -231,7 +231,7 @@ public class ShipBoatEntity extends BoatEntity {
         if (Math.abs(updated.y) < 0.003D) {
             this.setVelocity(updated.x, 0.0D, updated.z);
         } else {
-            this.setVelocity(updated.x, updated.y * 0.92D, updated.z);
+            this.setVelocity(updated.x, updated.y * 0.95D, updated.z);
         }
     }
 
