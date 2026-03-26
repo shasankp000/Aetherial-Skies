@@ -222,9 +222,6 @@ public class ShipBoatEntity extends BoatEntity {
             double restoring = displacement * 0.08D;
             double assistLift = buoyancyAssist * 0.015D;
             buoyancyForce = restoring + assistLift;
-
-            Vec3d vel = this.getVelocity();
-            this.setVelocity(vel.x * 0.9D, vel.y, vel.z * 0.9D);
         }
 
         Vec3d currentVel = this.getVelocity();

@@ -222,12 +222,6 @@ public class ShipCollisionPartEntity extends Entity {
             return cachedOwner;
         }
 
-        if (ownerSearchCooldown > 0) {
-            ownerSearchCooldown--;
-            return null;
-        }
-        ownerSearchCooldown = 10;
-
         if (ownerEntityId >= 0) {
             Entity byId = this.getWorld().getEntityById(ownerEntityId);
             if (byId instanceof ShipBoatEntity ship
@@ -238,9 +232,15 @@ public class ShipCollisionPartEntity extends Entity {
             }
         }
 
+        if (ownerSearchCooldown > 0) {
+            ownerSearchCooldown--;
+            return null;
+        }
+        ownerSearchCooldown = 100;
+
         List<ShipBoatEntity> owners = this.getWorld().getEntitiesByClass(
                 ShipBoatEntity.class,
-                this.getBoundingBox().expand(64.0D),
+                this.getBoundingBox().expand(16.0D),
                 ship -> ownerShipId != null && ownerShipId.equals(ship.getShipId())
         );
 
