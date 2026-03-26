@@ -9,7 +9,6 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.shasankp000.Entity.ShipBoatEntity;
-import net.shasankp000.Ship.ShipCollisionLayerService;
 
 public final class ShipDeployService {
     private static final String SHIP_CRATE_TAG = "ShipCrateData";
@@ -48,7 +47,6 @@ public final class ShipDeployService {
         if (!world.spawnEntity(shipBoat)) {
             return new DeployResult(false, "Failed to spawn ship.");
         }
-        ShipCollisionLayerService.rebuildLayer(shipBoat);
 
         if (!player.isCreative()) {
             stack.decrement(1);

@@ -268,7 +268,8 @@ public class ShipCollisionPartEntity extends Entity {
 
     @Override
     public boolean isCollidable() {
-        return true;
+        // Collision parts are temporarily disabled until a scalable hull-collision design is implemented.
+        return false;
     }
 
     @Override

@@ -9,13 +9,11 @@ import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.nbt.NbtCompound;
-import net.minecraft.server.world.ServerWorld;
 import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import net.shasankp000.Registry.ModEntityTypes;
-import net.shasankp000.Ship.ShipCollisionLayerService;
 import net.shasankp000.Ship.ShipCrateService;
 import net.shasankp000.Ship.ShipHullData;
 
@@ -323,16 +321,12 @@ public class ShipBoatEntity extends BoatEntity {
         super.tick();
         applyHullBuoyancy();
         if (!this.getWorld().isClient()) {
-            ShipCollisionLayerService.ensureLayer(this);
             clampToTerrain();
         }
     }
 
     @Override
     public void remove(RemovalReason reason) {
-        if (!this.getWorld().isClient() && this.getWorld() instanceof ServerWorld world) {
-            ShipCollisionLayerService.removeLayer(world, this.getShipId(), this.getBoundingBox().expand(16.0D));
-        }
         super.remove(reason);
     }
 }
