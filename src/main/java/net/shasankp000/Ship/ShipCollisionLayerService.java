@@ -14,7 +14,7 @@ import java.util.Map;
 import java.util.UUID;
 
 public final class ShipCollisionLayerService {
-    private static final double SEARCH_RADIUS = 96.0D;
+    private static final double SEARCH_RADIUS = 16.0D;
 
     private ShipCollisionLayerService() {
     }
@@ -39,7 +39,7 @@ public final class ShipCollisionLayerService {
         if (!(ship.getWorld() instanceof ServerWorld world)) {
             return;
         }
-        if (ship.age % 20 != 0) {
+        if (ship.age % 100 != 0) {
             return;
         }
 
@@ -51,7 +51,9 @@ public final class ShipCollisionLayerService {
         );
         int expected = ship.getExpectedLayerCount();
         if (existing.size() != expected) {
-            rebuildLayer(ship);
+            if (ship.canRebuildLayer()) {
+                rebuildLayer(ship);
+            }
         }
     }
 

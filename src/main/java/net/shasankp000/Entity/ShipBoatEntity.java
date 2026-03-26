@@ -37,6 +37,7 @@ public class ShipBoatEntity extends BoatEntity {
     private int cachedLayerCount = -1;
     private float cachedSubmersion = 0.0f;
     private int submersionCheckCooldown = 0;
+    private int lastRebuildAge = -200;
 
     public ShipBoatEntity(EntityType<? extends ShipBoatEntity> entityType, World world) {
         super(entityType, world);
@@ -95,6 +96,14 @@ public class ShipBoatEntity extends BoatEntity {
         return cachedLayerCount;
     }
 
+    public boolean canRebuildLayer() {
+        if (this.age - lastRebuildAge < 100) {
+            return false;
+        }
+        lastRebuildAge = this.age;
+        return true;
+    }
+
     @Override
     public EntityDimensions getDimensions(EntityPose pose) {
         return cachedDimensions;
@@ -114,8 +123,7 @@ public class ShipBoatEntity extends BoatEntity {
             return;
         }
 
-        ShipHullData.HullBounds bounds = hull.computeBounds();
-        cachedBounds = bounds;
+        cachedBounds = hull.computeBounds();
 
         // Keep ship core collider at vanilla size so it cannot block itself against its own collision parts.
         cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
@@ -316,8 +324,8 @@ public class ShipBoatEntity extends BoatEntity {
     @Override
     public void tick() {
         super.tick();
+        applyHullBuoyancy();
         if (!this.getWorld().isClient()) {
-            applyHullBuoyancy();
             ShipCollisionLayerService.ensureLayer(this);
             clampToTerrain();
         }
@@ -326,7 +334,7 @@ public class ShipBoatEntity extends BoatEntity {
     @Override
     public void remove(RemovalReason reason) {
         if (!this.getWorld().isClient() && this.getWorld() instanceof ServerWorld world) {
-            ShipCollisionLayerService.removeLayer(world, this.getShipId(), this.getBoundingBox().expand(128.0D));
+            ShipCollisionLayerService.removeLayer(world, this.getShipId(), this.getBoundingBox().expand(16.0D));
         }
         super.remove(reason);
     }

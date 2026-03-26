@@ -31,7 +31,7 @@ public final class ModEntityTypes {
                     FabricEntityTypeBuilder.<ShipBoatEntity>create(SpawnGroup.MISC, ShipBoatEntity::new)
                             .dimensions(EntityDimensions.changing(1.375f, 0.5625f))
                             .trackRangeBlocks(128)
-                            .trackedUpdateRate(3)
+                            .trackedUpdateRate(1)
                             .build()
             );
 
@@ -42,7 +42,7 @@ public final class ModEntityTypes {
                     FabricEntityTypeBuilder.<ShipCollisionPartEntity>create(SpawnGroup.MISC, ShipCollisionPartEntity::new)
                             .dimensions(EntityDimensions.fixed(1.0f, 1.0f))
                             .trackRangeBlocks(64)
-                            .trackedUpdateRate(2)
+                            .trackedUpdateRate(1)
                             .build()
             );
 
