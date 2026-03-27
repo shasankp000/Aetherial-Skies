@@ -1,406 +1,75 @@
 # Ship Deck Walking — Entity Dragger Pattern Implementation
 
-> **For GitHub Copilot:** This document is the complete specification for implementing ship-local player movement and deck walking. It is a direct continuation of `docs/ship-buoyancy-rework-impl.md`. Read that document first. All paths are relative to project root. Target branch: `1.20.1`.
+> **For GitHub Copilot:** This document is the complete specification for fixing active hitbox/mounting bugs and implementing ship-local deck walking. It is a direct continuation of `docs/ship-buoyancy-rework-impl.md`. Read that document first. All paths are relative to project root. Target branch: `1.20.1`.
 >
 > **Do not use Valkyrien Skies as a dependency.** This document describes a self-contained re-implementation of the same concept, adapted for Aetherial Skies' single-entity ship architecture.
+>
+> ⚠️ **Implement Phase 1 first. Build and test in-game before starting Phase 2.**
 
 ---
 
 ## 0. Problem Statement
 
-Minecraft entity bounding boxes (`Box`/`AABB`) are always **axis-aligned**. They cannot rotate with the ship. This causes two problems:
+There are currently **three active bugs** and **one architectural gap** to address:
 
-1. **Corner fall-through:** When the ship is rotated, the axis-aligned box does not cover the rotated corners of the visual hull. The player steps off the box and falls.
-2. **Deck walking misalignment:** When the player walks on deck while the ship is moving or turning, their movement is in world space, not ship-local space. They drift and slide relative to the ship frame.
+### Active Bugs (Phase 1)
+| # | Bug | Root Cause |
+|---|---|---|
+| 1 | Player cannot mount boat on right-click | `Entity.baseTick()` does not call `updatePassengerPositions()` — this was never wired up after the vanilla `BoatEntity.tick()` was suppressed |
+| 2 | Hitbox is 1 block taller than the ship deck | `recalculateDimensions()` sets AABB height to `cachedBounds.height()` which includes the full block column height, placing the AABB top one block above the visible deck surface |
+| 3 | Hitbox does not rotate with the ship | `EntityDimensions`/`Box` is always axis-aligned — cannot be rotated. The expanded AABB is the wrong tool for deck collision entirely |
 
-**The solution (inspired by VS2's EntityDragger pattern) does not fight the AABB limitation — it works around it entirely:**
-
-- Keep the AABB at vanilla size (do NOT expand it to hull dimensions).
-- Track the ship's position and yaw delta each tick.
-- Detect players standing on the ship's deck surface each tick.
-- Apply the ship's motion delta directly to those players.
-- Rotate the player's input vector into the ship's local frame so movement feels natural.
-
-The player never needs to stand on the AABB. They stand on the ship deck visually, and the dragger system keeps them stuck to it programmatically.
-
----
-
-## 1. Architecture Overview
-
-```
-ShipBoatEntity.tick()
-  └── ShipPhysicsEngine.tick()         ← physics (buoyancy, gravity)
-  └── ShipDeckDragger.tickDragging()   ← NEW: deck player tracking + motion delta
-        └── for each nearby ServerPlayerEntity:
-              if isStandingOnDeck(player, ship):
-                  applyShipMotionDelta(player, ship)
-                  setDraggingState(player, ship)
-
-LivingEntityMovementMixin (inject into LivingEntity.travel())
-  └── if player isDraggedByShip:
-        rotate input vector from world space → ship-local space
-        call original travel() with rotated input
-        rotate output velocity back → world space
-```
+### Architectural Gap (Phase 2)
+Minecraft entity bounding boxes (`Box`/`AABB`) are **always axis-aligned** and fundamentally cannot rotate. The solution is to stop relying on the AABB for deck presence detection entirely, and instead use a server-side tick system that:
+- Tracks the ship's position and yaw delta each tick
+- Detects players standing on the ship's deck in **ship-local (rotated) space**
+- Teleports those players by the ship's motion delta each tick
+- Rotates the player's WASD input into the ship's local frame so walking feels natural
 
 ---
 
-## 2. New Files to Create
-
-### 2.1 `ShipDeckDragger.java`
-
-Create: `src/main/java/net/shasankp000/Ship/Physics/ShipDeckDragger.java`
-
-This class runs server-side each tick inside `ShipBoatEntity`. It:
-- Scans nearby players within the ship's footprint
-- Detects which are standing on the deck surface
-- Applies the ship's motion delta to those players
-- Tags them with a `DraggingInfo` stored in a companion interface
-
-```java
-package net.shasankp000.Ship.Physics;
-
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-import net.shasankp000.Entity.ShipBoatEntity;
-import net.shasankp000.Ship.ShipHullData;
-import net.shasankp000.mixin.IShipDraggable;
-
-import java.util.List;
-import java.util.UUID;
-
-public class ShipDeckDragger {
-
-    // How many blocks above the top of the ship AABB a player can be and still count as "on deck".
-    private static final double DECK_TOLERANCE_ABOVE = 0.6D;
-    // How many blocks below the ship top surface counts as "inside the deck" (feet in the hull).
-    private static final double DECK_TOLERANCE_BELOW = 0.2D;
-
-    /**
-     * Called every server tick from ShipBoatEntity.tick().
-     *
-     * @param ship        the ship entity
-     * @param prevPos     ship position at the START of this tick (before physics engine ran)
-     * @param prevYaw     ship yaw at the START of this tick
-     */
-    public static void tickDragging(ShipBoatEntity ship, Vec3d prevPos, float prevYaw) {
-        if (!(ship.getWorld() instanceof ServerWorld serverWorld)) {
-            return;
-        }
-
-        ShipHullData hull = ship.getHullData();
-        if (hull == null || hull.blocks().isEmpty()) {
-            return;
-        }
-
-        ShipHullData.HullBounds bounds = hull.computeBounds();
-        // Deck Y is the world Y of the top surface of the hull (where the player stands)
-        double deckWorldY = ship.getY() + bounds.maxY() - 1.0D;
-        double halfWidth  = Math.max(bounds.widthX(), bounds.widthZ()) * 0.5D + 0.5D; // small margin
-
-        // Position delta applied by physics engine this tick
-        Vec3d posDelta = ship.getPos().subtract(prevPos);
-        // Yaw delta this tick
-        float yawDelta = MathHelper.wrapDegrees(ship.getYaw() - prevYaw);
-
-        // Search box: generous horizontal area around ship, only near deck height
-        Box searchBox = new Box(
-            ship.getX() - halfWidth,
-            deckWorldY - DECK_TOLERANCE_BELOW,
-            ship.getZ() - halfWidth,
-            ship.getX() + halfWidth,
-            deckWorldY + DECK_TOLERANCE_ABOVE + 2.0D,
-            ship.getZ() + halfWidth
-        );
-
-        List<ServerPlayerEntity> candidates = serverWorld.getEntitiesByClass(
-            ServerPlayerEntity.class, searchBox, p -> !p.isSpectator()
-        );
-
-        for (ServerPlayerEntity player : candidates) {
-            if (!isOnDeck(player, ship, deckWorldY, halfWidth)) {
-                // Player left the deck — clear dragging state
-                if (player instanceof IShipDraggable draggable) {
-                    draggable.aetherial$setDraggedShipId(null);
-                }
-                continue;
-            }
-
-            // Apply ship translation delta
-            Vec3d newPlayerPos = player.getPos().add(posDelta);
-
-            // Apply ship yaw rotation delta around ship center
-            if (Math.abs(yawDelta) > 0.001f) {
-                double dx = newPlayerPos.x - ship.getX();
-                double dz = newPlayerPos.z - ship.getZ();
-                double angle = Math.toRadians(yawDelta);
-                double cos = Math.cos(angle);
-                double sin = Math.sin(angle);
-                double rotX = dx * cos - dz * sin;
-                double rotZ = dx * sin + dz * cos;
-                newPlayerPos = new Vec3d(
-                    ship.getX() + rotX,
-                    newPlayerPos.y,
-                    ship.getZ() + rotZ
-                );
-            }
-
-            // Snap player Y to deck surface to prevent sinking through
-            // Player feet should be exactly at deckWorldY
-            newPlayerPos = new Vec3d(newPlayerPos.x, deckWorldY, newPlayerPos.z);
-
-            player.teleport(
-                serverWorld,
-                newPlayerPos.x,
-                newPlayerPos.y,
-                newPlayerPos.z,
-                player.getYaw(),
-                player.getPitch()
-            );
-
-            // Mark this player as being dragged by this ship
-            if (player instanceof IShipDraggable draggable) {
-                draggable.aetherial$setDraggedShipId(ship.getShipId());
-                draggable.aetherial$setLastShipYaw(ship.getYaw());
-            }
-        }
-    }
-
-    /**
-     * Returns true if the player is standing on the ship's deck surface within the
-     * rotated hull footprint.
-     */
-    private static boolean isOnDeck(
-        ServerPlayerEntity player,
-        ShipBoatEntity ship,
-        double deckWorldY,
-        double halfWidth
-    ) {
-        double playerFeetY = player.getY();
-
-        // Player feet must be near the deck surface
-        if (playerFeetY < deckWorldY - DECK_TOLERANCE_BELOW
-         || playerFeetY > deckWorldY + DECK_TOLERANCE_ABOVE) {
-            return false;
-        }
-
-        // Transform player world position into ship-local space and check hull footprint
-        double dx = player.getX() - ship.getX();
-        double dz = player.getZ() - ship.getZ();
-        double yawRad = Math.toRadians(-ship.getYaw());
-        double cos = Math.cos(yawRad);
-        double sin = Math.sin(yawRad);
-        double localX = dx * cos + dz * sin;
-        double localZ = -dx * sin + dz * cos;
-
-        ShipHullData hull = ship.getHullData();
-        if (hull == null) return false;
-        ShipHullData.HullBounds b = hull.computeBounds();
-
-        // Small inward margin so player standing at edge still counts
-        double margin = 0.3D;
-        return localX >= b.minX() - margin && localX <= b.maxX() + margin
-            && localZ >= b.minZ() - margin && localZ <= b.maxZ() + margin;
-    }
-}
-```
-
+---
+# PHASE 1 — Immediate Bug Fixes
 ---
 
-### 2.2 `IShipDraggable.java` — Mixin Duck Interface
+> **Copilot: implement only the changes in this section first. Do not touch Phase 2 yet.**
+> After Phase 1, the player should be able to mount the ship, stand on it without sinking through visually, and the game should compile and run.
 
-Create: `src/main/java/net/shasankp000/mixin/IShipDraggable.java`
+## P1-1. Fix `ShipBoatEntity.tick()` — Restore Passenger Updates (Bug 1)
 
-This interface is injected onto `ServerPlayerEntity` via a mixin to carry per-player dragging state without polluting the player class. This is exactly the "mixin duck" pattern used by VS2.
+File: `src/main/java/net/shasankp000/Entity/ShipBoatEntity.java`
 
-```java
-package net.shasankp000.mixin;
+`Entity.baseTick()` does not call `updatePassengerPositions()`. This means after mounting, the game never repositions the passenger each tick and the rider is immediately ejected or frozen. Add the call manually.
 
-import java.util.UUID;
-
-/**
- * Injected onto ServerPlayerEntity via MixinServerPlayerDragging.
- * Carries the ship-dragging state for deck walking.
- */
-public interface IShipDraggable {
-    UUID aetherial$getDraggedShipId();
-    void aetherial$setDraggedShipId(UUID shipId);
-    float aetherial$getLastShipYaw();
-    void aetherial$setLastShipYaw(float yaw);
-    boolean aetherial$isDraggedByShip();
-}
-```
-
----
-
-### 2.3 `MixinServerPlayerDragging.java` — Implements the Duck Interface
-
-Create: `src/main/java/net/shasankp000/mixin/MixinServerPlayerDragging.java`
-
-This mixin injects the dragging state fields onto `ServerPlayerEntity`.
-
-```java
-package net.shasankp000.mixin;
-
-import net.minecraft.server.network.ServerPlayerEntity;
-import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Unique;
-
-import java.util.UUID;
-
-@Mixin(ServerPlayerEntity.class)
-public class MixinServerPlayerDragging implements IShipDraggable {
-
-    @Unique
-    private UUID aetherial$draggedShipId = null;
-
-    @Unique
-    private float aetherial$lastShipYaw = 0.0f;
-
-    @Override
-    public UUID aetherial$getDraggedShipId() {
-        return aetherial$draggedShipId;
-    }
-
-    @Override
-    public void aetherial$setDraggedShipId(UUID shipId) {
-        this.aetherial$draggedShipId = shipId;
-    }
-
-    @Override
-    public float aetherial$getLastShipYaw() {
-        return aetherial$lastShipYaw;
-    }
-
-    @Override
-    public void aetherial$setLastShipYaw(float yaw) {
-        this.aetherial$lastShipYaw = yaw;
-    }
-
-    @Override
-    public boolean aetherial$isDraggedByShip() {
-        return aetherial$draggedShipId != null;
-    }
-}
-```
-
----
-
-### 2.4 `MixinLivingEntityMovement.java` — Rotate Input Vector
-
-Create: `src/main/java/net/shasankp000/mixin/MixinLivingEntityMovement.java`
-
-This is the most important mixin. It intercepts player movement input **before** Minecraft's physics integrates it, rotates it into ship-local space, then rotates the resulting velocity back. The player feels like they are walking relative to the ship's heading rather than world north.
-
-```java
-package net.shasankp000.mixin;
-
-import net.minecraft.entity.LivingEntity;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.util.math.Vec3d;
-import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.ModifyVariable;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-
-@Mixin(LivingEntity.class)
-public class MixinLivingEntityMovement {
-
-    /**
-     * Intercepts the movementInput Vec3d passed to LivingEntity.travel().
-     * If the player is being dragged by a ship, rotates the input vector
-     * from world space into ship-local space.
-     *
-     * The ship's yaw is stored in IShipDraggable.aetherial$getLastShipYaw().
-     */
-    @ModifyVariable(
-        method = "travel",
-        at = @At("HEAD"),
-        argsOnly = true,
-        index = 1
-    )
-    private Vec3d aetherial$rotateInputToShipLocal(Vec3d movementInput) {
-        LivingEntity self = (LivingEntity)(Object)this;
-
-        // Only apply to server-side players being dragged by a ship
-        if (!(self instanceof ServerPlayerEntity player)) {
-            return movementInput;
-        }
-        if (!(player instanceof IShipDraggable draggable)) {
-            return movementInput;
-        }
-        if (!draggable.aetherial$isDraggedByShip()) {
-            return movementInput;
-        }
-
-        float shipYaw = draggable.aetherial$getLastShipYaw();
-        // Player's own facing yaw
-        float playerYaw = player.getYaw();
-        // Relative yaw: how far the player is rotated from the ship's heading
-        float relativeYaw = playerYaw - shipYaw;
-
-        // Rotate the STRAFE (x) and FORWARD (z) components of movement input
-        // from the player's world-facing direction into the ship-local frame.
-        // movementInput: x = strafe, y = vertical, z = forward
-        double rad = Math.toRadians(relativeYaw);
-        double cos = Math.cos(rad);
-        double sin = Math.sin(rad);
-
-        double localX = movementInput.x * cos - movementInput.z * sin;
-        double localZ = movementInput.x * sin + movementInput.z * cos;
-
-        return new Vec3d(localX, movementInput.y, localZ);
-    }
-}
-```
-
-**Important note for Copilot:** The `@ModifyVariable` index may need adjustment depending on the exact Yarn mapping of `LivingEntity.travel(Vec3d)` in 1.20.1. Verify the method signature is `travel(Vec3d movementInput)` and that index 1 correctly refers to the `movementInput` parameter. If not, adjust the index or use `ordinal = 0` instead.
-
----
-
-## 3. Modifications to Existing Files
-
-### 3.1 `ShipBoatEntity.java` — Wire the Dragger
-
-The dragger needs the ship's position and yaw **before** the physics engine moves it. Capture them at the start of `tick()` and pass to the dragger after physics.
+**Replace the existing `tick()` method with:**
 
 ```java
 @Override
 public void tick() {
-    // Capture pre-physics state for the dragger delta calculation
-    Vec3d prevPos = this.getPos();
-    float prevYaw = this.getYaw();
-
     // Run base entity lifecycle (skips BoatEntity vanilla physics via BoatEntityMixin)
     ((EntityTickInvoker) this).invokeBaseTick();
+
+    // Entity.baseTick() does NOT call updatePassengerPositions().
+    // Without this, riders are never repositioned and get ejected immediately.
     this.updatePassengerPositions();
 
-    if (!this.getWorld().isClient()) {
-        // 1. Run physics engine (modifies position + velocity)
-        if (physicsEngine != null) {
-            physicsEngine.syncFrom(this);
-            physicsEngine.tick();
-            physicsEngine.applyTo(this);
-        }
-
-        // 2. Run deck dragger AFTER physics so delta is position_new - position_old
-        ShipDeckDragger.tickDragging(this, prevPos, prevYaw);
+    if (!this.getWorld().isClient() && physicsEngine != null) {
+        physicsEngine.syncFrom(this);
+        physicsEngine.tick();
+        physicsEngine.applyTo(this);
     }
 }
 ```
 
-Also add this import at the top of `ShipBoatEntity.java`:
-```java
-import net.shasankp000.Ship.Physics.ShipDeckDragger;
-```
+---
 
-### 3.2 `ShipBoatEntity.recalculateDimensions()` — Revert to Vanilla AABB Size
+## P1-2. Fix `recalculateDimensions()` — Revert AABB to Vanilla Size (Bugs 2 & 3)
 
-With the dragger system handling deck walking, the expanded AABB is no longer needed and actively causes problems (sinking, self-collision). Revert to vanilla boat dimensions:
+File: `src/main/java/net/shasankp000/Entity/ShipBoatEntity.java`
+
+The expanded AABB is the source of both the height overflow (Bug 2) and the rotation mismatch (Bug 3). Since deck walking will be handled by the `ShipDeckDragger` system in Phase 2, the AABB must be reverted to vanilla boat size. This also fixes an unrelated side effect where the large AABB was inflating the fluid volume detected for buoyancy calculations.
+
+**Replace the entire `recalculateDimensions()` method with:**
 
 ```java
 private void recalculateDimensions() {
@@ -417,10 +86,13 @@ private void recalculateDimensions() {
 
     cachedBounds = hull.computeBounds();
 
-    // IMPORTANT: Keep AABB at vanilla boat size.
-    // Deck walking is handled by ShipDeckDragger, not the AABB.
-    // An expanded AABB causes the entity to fight its own buoyancy
-    // (fluid detection reads the AABB volume) and blocks player mounting.
+    // Keep AABB at vanilla boat size.
+    // Deck presence detection is handled by ShipDeckDragger (Phase 2), not the AABB.
+    // An expanded AABB causes:
+    //   - the entity to visually stand 1+ blocks above the deck (Bug 2)
+    //   - the AABB to be axis-aligned while the hull is rotated (Bug 3)
+    //   - buoyancy over-calculation (fluid detection reads AABB volume)
+    //   - player mounting to fail in edge cases
     cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
 
     ShipPhysicsState newState = new ShipPhysicsState();
@@ -437,47 +109,348 @@ private void recalculateDimensions() {
 }
 ```
 
-### 3.3 `ShipBoatEntity.updatePassengerPosition()` — Fix Mounting
-
-The current implementation correctly positions the rider at the helm offset. However, we must also fix the issue where the player cannot mount via right-click. The root issue is that `BoatEntityMixin` was cancelling `BoatEntity.tick()` at `HEAD`, which prevented the internal `inWater`/`onGround` flags from being set — flags that `BoatEntity.interact()` checks before allowing a rider.
-
-Change `BoatEntityMixin` to cancel at the movement/physics step, not at `HEAD` (see Section 4 below). This allows `interact()` and passenger setup to run normally.
-
 ---
 
-## 4. Fix `BoatEntityMixin.java` — Mount Interaction Restored
+## P1-3. `BoatEntityMixin.java` — No Change Needed
 
 File: `src/main/java/net/shasankp000/mixin/BoatEntityMixin.java`
 
-**Replace the existing mixin entirely:**
+The existing HEAD-cancel mixin is correct and should remain unchanged. The mount fix in P1-1 (`updatePassengerPositions()`) is sufficient — the mixin itself is not the cause of Bug 1.
+
+---
+
+## P1 Checklist
+
+- [ ] `ShipBoatEntity.tick()` calls `this.updatePassengerPositions()` after `invokeBaseTick()`
+- [ ] `ShipBoatEntity.recalculateDimensions()` sets `cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f)` unconditionally (no hull-size expansion)
+- [ ] `BoatEntityMixin.java` is left untouched
+- [ ] Project compiles with no errors
+- [ ] **In-game test:** right-click ship → player mounts at helm offset ✓
+- [ ] **In-game test:** player stands on ship → no "standing on air" gap ✓
+- [ ] **In-game test:** ship is rotated → player no longer falls through at corners (partial fix; corners fully addressed in Phase 2) ✓
+
+---
+
+---
+# PHASE 2 — Deck Walking System (Entity Dragger Pattern)
+---
+
+> **Copilot: only begin Phase 2 after Phase 1 has been tested and confirmed working in-game.**
+
+## P2-0. Architecture Overview
+
+```
+ShipBoatEntity.tick()
+  └── invokeBaseTick() + updatePassengerPositions()   ← from Phase 1
+  └── ShipPhysicsEngine.tick()                        ← physics (buoyancy, gravity)
+  └── ShipDeckDragger.tickDragging()                  ← NEW: deck player tracking + motion delta
+        └── for each nearby ServerPlayerEntity:
+              if isStandingOnDeck(player, ship, bounds):  ← rotated footprint check
+                  applyShipMotionDelta(player, ship)
+                  setDraggingState(player, ship)
+
+MixinLivingEntityMovement (inject into LivingEntity.travel())
+  └── if player isDraggedByShip:
+        rotate WASD input vector from world space → ship-local space
+```
+
+---
+
+## P2-1. New File: `ShipDeckDragger.java`
+
+Create: `src/main/java/net/shasankp000/Ship/Physics/ShipDeckDragger.java`
+
+This is the core of the deck walking system. It runs server-side every tick, finds players standing on the ship's deck in rotated local space, and teleports them by the exact delta the ship moved this tick.
+
+```java
+package net.shasankp000.Ship.Physics;
+
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+import net.shasankp000.Entity.ShipBoatEntity;
+import net.shasankp000.Ship.ShipHullData;
+import net.shasankp000.mixin.IShipDraggable;
+
+import java.util.List;
+
+public class ShipDeckDragger {
+
+    // How many blocks above the deck top a player can be and still count as on deck.
+    private static final double DECK_TOLERANCE_ABOVE = 0.6D;
+    // How many blocks below the deck top (feet inside the hull) still count as on deck.
+    private static final double DECK_TOLERANCE_BELOW = 0.2D;
+
+    /**
+     * Called every server tick from ShipBoatEntity.tick() AFTER the physics engine runs.
+     *
+     * @param ship       the ship entity
+     * @param bounds     pre-computed hull bounds (ShipBoatEntity.cachedBounds) — must not be null
+     * @param prevPos    ship position BEFORE physics ran this tick
+     * @param prevYaw    ship yaw BEFORE physics ran this tick
+     */
+    public static void tickDragging(
+        ShipBoatEntity ship,
+        ShipHullData.HullBounds bounds,
+        Vec3d prevPos,
+        float prevYaw
+    ) {
+        if (!(ship.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+        if (bounds == null) {
+            return;
+        }
+
+        // Deck Y is the world Y of the top face of the topmost hull block
+        double deckWorldY = ship.getY() + bounds.maxY() - 1.0D;
+        double halfWidth  = Math.max(bounds.widthX(), bounds.widthZ()) * 0.5D + 0.5D;
+
+        // Delta the ship moved this tick
+        Vec3d posDelta = ship.getPos().subtract(prevPos);
+        float yawDelta  = MathHelper.wrapDegrees(ship.getYaw() - prevYaw);
+
+        // Search box centred on ship, vertically spanning the deck band
+        Box searchBox = new Box(
+            ship.getX() - halfWidth,
+            deckWorldY - DECK_TOLERANCE_BELOW,
+            ship.getZ() - halfWidth,
+            ship.getX() + halfWidth,
+            deckWorldY + DECK_TOLERANCE_ABOVE + 2.0D,
+            ship.getZ() + halfWidth
+        );
+
+        List<ServerPlayerEntity> candidates = serverWorld.getEntitiesByClass(
+            ServerPlayerEntity.class, searchBox, p -> !p.isSpectator() && !p.hasVehicle()
+        );
+
+        for (ServerPlayerEntity player : candidates) {
+            if (!isOnDeck(player, ship, bounds, deckWorldY)) {
+                // Player has left the deck — clear drag state so movement returns to normal
+                if (player instanceof IShipDraggable d) {
+                    d.aetherial$setDraggedShipId(null);
+                }
+                continue;
+            }
+
+            // 1. Apply ship's translation delta
+            Vec3d newPos = player.getPos().add(posDelta);
+
+            // 2. Apply ship's yaw rotation delta around ship centre
+            if (Math.abs(yawDelta) > 0.001f) {
+                double dx  = newPos.x - ship.getX();
+                double dz  = newPos.z - ship.getZ();
+                double rad = Math.toRadians(yawDelta);
+                double cos = Math.cos(rad), sin = Math.sin(rad);
+                newPos = new Vec3d(
+                    ship.getX() + dx * cos - dz * sin,
+                    newPos.y,
+                    ship.getZ() + dx * sin + dz * cos
+                );
+            }
+
+            // 3. Snap Y to deck surface only when player is not jumping
+            //    (if velocity.y > 0 the player is mid-jump; let them rise freely)
+            if (player.getVelocity().y <= 0.0D || player.isOnGround()) {
+                newPos = new Vec3d(newPos.x, deckWorldY, newPos.z);
+            }
+
+            player.teleport(
+                serverWorld,
+                newPos.x, newPos.y, newPos.z,
+                player.getYaw(), player.getPitch()
+            );
+
+            // 4. Tag player as being dragged by this ship
+            if (player instanceof IShipDraggable d) {
+                d.aetherial$setDraggedShipId(ship.getShipId());
+                d.aetherial$setLastShipYaw(ship.getYaw());
+            }
+        }
+    }
+
+    /**
+     * Returns true if the player's feet are within the ship's rotated hull footprint
+     * at approximately deck height.
+     */
+    private static boolean isOnDeck(
+        ServerPlayerEntity player,
+        ShipBoatEntity ship,
+        ShipHullData.HullBounds b,
+        double deckWorldY
+    ) {
+        double feetY = player.getY();
+        if (feetY < deckWorldY - DECK_TOLERANCE_BELOW
+         || feetY > deckWorldY + DECK_TOLERANCE_ABOVE) {
+            return false;
+        }
+
+        // Rotate player position into ship-local space
+        double dx     = player.getX() - ship.getX();
+        double dz     = player.getZ() - ship.getZ();
+        double yawRad = Math.toRadians(-ship.getYaw());
+        double cos    = Math.cos(yawRad), sin = Math.sin(yawRad);
+        double localX = dx * cos + dz * sin;
+        double localZ = -dx * sin + dz * cos;
+
+        double margin = 0.3D;
+        return localX >= b.minX() - margin && localX <= b.maxX() + margin
+            && localZ >= b.minZ() - margin && localZ <= b.maxZ() + margin;
+    }
+}
+```
+
+---
+
+## P2-2. New File: `IShipDraggable.java` — Mixin Duck Interface
+
+Create: `src/main/java/net/shasankp000/mixin/IShipDraggable.java`
+
+This is a **plain Java interface** — do NOT register it as a mixin. It is implemented by `MixinServerPlayerDragging` which IS registered.
 
 ```java
 package net.shasankp000.mixin;
 
-import net.minecraft.entity.vehicle.BoatEntity;
-import net.shasankp000.Entity.ShipBoatEntity;
+import java.util.UUID;
+
+/**
+ * Duck interface implemented by MixinServerPlayerDragging on ServerPlayerEntity.
+ * Carries per-player ship-dragging state used by ShipDeckDragger.
+ */
+public interface IShipDraggable {
+    UUID aetherial$getDraggedShipId();
+    void aetherial$setDraggedShipId(UUID shipId);
+    float aetherial$getLastShipYaw();
+    void aetherial$setLastShipYaw(float yaw);
+    boolean aetherial$isDraggedByShip();
+}
+```
+
+---
+
+## P2-3. New File: `MixinServerPlayerDragging.java`
+
+Create: `src/main/java/net/shasankp000/mixin/MixinServerPlayerDragging.java`
+
+Injects the dragging state fields onto `ServerPlayerEntity` via Mixin.
+
+```java
+package net.shasankp000.mixin;
+
+import net.minecraft.server.network.ServerPlayerEntity;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
+
+import java.util.UUID;
+
+@Mixin(ServerPlayerEntity.class)
+public class MixinServerPlayerDragging implements IShipDraggable {
+
+    @Unique private UUID   aetherial$draggedShipId = null;
+    @Unique private float  aetherial$lastShipYaw   = 0.0f;
+
+    @Override public UUID  aetherial$getDraggedShipId()       { return aetherial$draggedShipId; }
+    @Override public void  aetherial$setDraggedShipId(UUID id){ this.aetherial$draggedShipId = id; }
+    @Override public float aetherial$getLastShipYaw()         { return aetherial$lastShipYaw; }
+    @Override public void  aetherial$setLastShipYaw(float y)  { this.aetherial$lastShipYaw = y; }
+    @Override public boolean aetherial$isDraggedByShip()      { return aetherial$draggedShipId != null; }
+}
+```
+
+---
+
+## P2-4. New File: `MixinLivingEntityMovement.java` — Rotate Input Vector
+
+Create: `src/main/java/net/shasankp000/mixin/MixinLivingEntityMovement.java`
+
+Intercepts `LivingEntity.travel(Vec3d)` and rotates the player's WASD input into ship-local space while they are being dragged. Without this, pressing W moves the player toward world north even if the ship is facing east.
+
+```java
+package net.shasankp000.mixin;
+
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.util.math.Vec3d;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
-@Mixin(BoatEntity.class)
-public class BoatEntityMixin {
+@Mixin(LivingEntity.class)
+public class MixinLivingEntityMovement {
 
     /**
-     * For ShipBoatEntity, we suppress vanilla BoatEntity.tick() entirely at HEAD.
-     * ShipBoatEntity.tick() calls invokeBaseTick() (Entity.baseTick) directly,
-     * then ShipPhysicsEngine, then ShipDeckDragger.
+     * Rotates the movement input vector from world-facing space to ship-local space
+     * when the player is standing on a ship's deck.
      *
-     * The mounting/interaction issue is NOT caused by this mixin — it is caused by
-     * Entity.baseTick() not calling updatePassengerPositions(). ShipBoatEntity.tick()
-     * now calls this.updatePassengerPositions() manually after invokeBaseTick().
-     * See Section 3.1.
+     * Yarn 1.20.1: LivingEntity.travel(Vec3d movementInput)
+     * index = 1 refers to the sole Vec3d parameter.
+     * If the build fails on this annotation, change index to 0 or use argsOnly = true.
      */
-    @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
-    private void aetherialSkies$suppressVanillaBoatTickForShip(CallbackInfo ci) {
-        if ((Object) this instanceof ShipBoatEntity) {
-            ci.cancel();
+    @ModifyVariable(
+        method = "travel",
+        at = @At("HEAD"),
+        argsOnly = true,
+        index = 1
+    )
+    private Vec3d aetherial$rotateInputToShipLocal(Vec3d movementInput) {
+        if (!((Object) this instanceof ServerPlayerEntity player)) {
+            return movementInput;
+        }
+        if (!(player instanceof IShipDraggable d) || !d.aetherial$isDraggedByShip()) {
+            return movementInput;
+        }
+
+        // relativeYaw = how much the player is facing away from the ship's bow
+        double rad = Math.toRadians(player.getYaw() - d.aetherial$getLastShipYaw());
+        double cos = Math.cos(rad), sin = Math.sin(rad);
+
+        // movementInput: x = strafe, y = vertical (jump/sneak), z = forward
+        return new Vec3d(
+            movementInput.x * cos - movementInput.z * sin,
+            movementInput.y,
+            movementInput.x * sin + movementInput.z * cos
+        );
+    }
+}
+```
+
+---
+
+## P2-5. Update `ShipBoatEntity.tick()` — Wire the Dragger
+
+File: `src/main/java/net/shasankp000/Entity/ShipBoatEntity.java`
+
+Capture `prevPos` and `prevYaw` **before** physics runs so the dragger can compute the delta. Pass `cachedBounds` directly to avoid recomputing bounds every tick per player.
+
+Add import at top of file:
+```java
+import net.shasankp000.Ship.Physics.ShipDeckDragger;
+```
+
+**Replace the `tick()` method produced in Phase 1 with:**
+
+```java
+@Override
+public void tick() {
+    // Snapshot pre-physics position and yaw for delta calculation in ShipDeckDragger
+    Vec3d prevPos = this.getPos();
+    float prevYaw = this.getYaw();
+
+    ((EntityTickInvoker) this).invokeBaseTick();
+    this.updatePassengerPositions();
+
+    if (!this.getWorld().isClient()) {
+        if (physicsEngine != null) {
+            physicsEngine.syncFrom(this);
+            physicsEngine.tick();
+            physicsEngine.applyTo(this);
+        }
+
+        // Run AFTER physics so posDelta = newPos - oldPos is the actual movement this tick
+        if (cachedBounds != null) {
+            ShipDeckDragger.tickDragging(this, cachedBounds, prevPos, prevYaw);
         }
     }
 }
@@ -485,16 +458,18 @@ public class BoatEntityMixin {
 
 ---
 
-## 5. Register New Mixins
+## P2-6. Register New Mixins
 
-In `src/main/resources/aetherial-skies.mixins.json`, add the following to the `"mixins"` array:
+File: `src/main/resources/aetherial-skies.mixins.json`
+
+Add to the `"mixins"` array:
 
 ```json
 "MixinServerPlayerDragging",
 "MixinLivingEntityMovement"
 ```
 
-The full `"mixins"` array should now include:
+Full `"mixins"` array after change:
 ```json
 "mixins": [
   "BoatEntityMixin",
@@ -504,73 +479,44 @@ The full `"mixins"` array should now include:
 ]
 ```
 
----
-
-## 6. `ShipHullData.java` — Cache `computeBounds()`
-
-`ShipDeckDragger.isOnDeck()` calls `hull.computeBounds()` every tick for every nearby player. `computeBounds()` iterates all blocks every call. To prevent this from becoming a new performance problem, **add a cached bounds field to `ShipBoatEntity`** (already exists as `cachedBounds`) and pass it into the dragger instead of recomputing.
-
-Change `ShipDeckDragger.tickDragging()` signature to accept pre-computed bounds:
-
-```java
-public static void tickDragging(
-    ShipBoatEntity ship,
-    ShipHullData.HullBounds bounds,   // pass cachedBounds from ShipBoatEntity
-    Vec3d prevPos,
-    float prevYaw
-)
-```
-
-And in `ShipBoatEntity.tick()`:
-```java
-ShipDeckDragger.tickDragging(this, cachedBounds, prevPos, prevYaw);
-```
-
-Update `isOnDeck()` to accept `HullBounds` as a parameter instead of calling `hull.computeBounds()` internally.
+> `IShipDraggable` is a plain interface — do **not** add it here.
 
 ---
 
-## 7. `ShipPhysicsEngine.java` — Expose Prev State for Delta
+## P2 Checklist
 
-The dragger needs the ship's position BEFORE physics runs. This is already handled in `ShipBoatEntity.tick()` by capturing `prevPos = this.getPos()` before calling `physicsEngine.tick()`. No changes needed to `ShipPhysicsEngine`.
-
----
-
-## 8. Implementation Checklist for Copilot
-
-- [ ] `ShipDeckDragger.java` created at `src/main/java/net/shasankp000/Ship/Physics/ShipDeckDragger.java`
-- [ ] `IShipDraggable.java` interface created at `src/main/java/net/shasankp000/mixin/IShipDraggable.java`
-- [ ] `MixinServerPlayerDragging.java` created at `src/main/java/net/shasankp000/mixin/MixinServerPlayerDragging.java`
-- [ ] `MixinLivingEntityMovement.java` created at `src/main/java/net/shasankp000/mixin/MixinLivingEntityMovement.java`
-- [ ] `BoatEntityMixin.java` updated per Section 4
-- [ ] `ShipBoatEntity.tick()` captures `prevPos` and `prevYaw` before physics, calls `ShipDeckDragger.tickDragging()` after physics
-- [ ] `ShipBoatEntity.tick()` calls `this.updatePassengerPositions()` after `invokeBaseTick()`
-- [ ] `ShipBoatEntity.recalculateDimensions()` reverts AABB to vanilla size `(1.375f, 0.5625f)`
-- [ ] `ShipDeckDragger.tickDragging()` accepts `HullBounds` from `ShipBoatEntity.cachedBounds`
-- [ ] `IShipDraggable` is NOT registered as a mixin — it is a plain Java interface. Only the implementation `MixinServerPlayerDragging` is registered.
+- [ ] `ShipDeckDragger.java` created
+- [ ] `IShipDraggable.java` created (plain interface, NOT in mixins.json)
+- [ ] `MixinServerPlayerDragging.java` created
+- [ ] `MixinLivingEntityMovement.java` created
+- [ ] `ShipBoatEntity.tick()` updated with `prevPos`/`prevYaw` capture and `ShipDeckDragger.tickDragging()` call
 - [ ] New mixins registered in `aetherial-skies.mixins.json`
 - [ ] Project compiles with no errors
+- [ ] **In-game test:** player dismounts and walks on deck → moves with ship, not in world space ✓
+- [ ] **In-game test:** ship rotates while player on deck → player rotates with it, no drift ✓
+- [ ] **In-game test:** player reaches hull edge → falls off naturally ✓
+- [ ] **In-game test:** player jumps on deck → jump arc is not interrupted ✓
 
 ---
 
-## 9. Expected Behaviour After Implementation
+## P2-7. Tuning Notes
+
+- **`DECK_TOLERANCE_ABOVE` (0.6):** Increase if players are not picked up when standing on deck. Decrease if flying players near the ship get dragged unexpectedly.
+- **`DECK_TOLERANCE_BELOW` (0.2):** Increase if players sink slightly below the deck surface before being snapped up.
+- **`margin` (0.3) in `isOnDeck()`:** The extra outward margin on the hull footprint rectangle. Increase if players fall off at corners; decrease if they are dragged when clearly off the ship.
+- **`teleport()` vs `setPosition()`:** The dragger uses `player.teleport()` to force-sync position to the client each tick. If this causes rubber-banding, switch to `player.setPosition()` followed by `player.networkHandler.syncWithPlayerPosition()`.
+- **Jump guard:** The Y-snap is already guarded by `player.getVelocity().y <= 0 || player.isOnGround()`. If players still cannot jump, widen this to also check `player.isHoldingOntoLadder()`.
+
+---
+
+## P2-8. Expected Behaviour After Full Implementation
 
 | Scenario | Expected Result |
 |---|---|
-| Player right-clicks ship | Mounts successfully at helm offset — `updatePassengerPositions()` is called each tick |
-| Player dismounts, walks on deck | `ShipDeckDragger` detects them within the rotated footprint, teleports them with ship each tick |
-| Ship turns while player is on deck | Player rotates with ship around ship center — no sliding off |
-| Player walks forward on deck | `MixinLivingEntityMovement` rotates input vector to ship-local frame — player moves relative to ship heading |
+| Right-click ship | Mounts at helm offset — `updatePassengerPositions()` called each tick |
+| Player on deck, ship drifts | Player moves with ship — `ShipDeckDragger` applies translation delta |
+| Ship turns while player on deck | Player rotates with ship around ship centre — no sliding off |
+| Player walks forward on deck | `MixinLivingEntityMovement` rotates W input to ship-local forward |
 | Player reaches hull edge | `isOnDeck()` returns false, dragging stops, player falls naturally |
-| Player jumps on deck | During jump arc, `playerFeetY` moves above `deckWorldY + DECK_TOLERANCE_ABOVE` — dragging temporarily pauses, resumes on landing |
-| Vanilla boat spawned | No effect — `IShipDraggable` check only runs if player is already tagged, `ShipDeckDragger` only runs from `ShipBoatEntity.tick()` |
-
----
-
-## 10. Tuning Notes
-
-- **`DECK_TOLERANCE_ABOVE` (0.6):** If players are not picked up when standing on deck, increase this slightly. If flying players get dragged, decrease it.
-- **`DECK_TOLERANCE_BELOW` (0.2):** Controls how deep inside the hull a player can be and still get dragged upward. Increase if players sink through slightly.
-- **`margin` (0.3) in `isOnDeck()`:** The hull footprint margin. Increase if players fall off at corners; decrease if players are dragged when clearly off the ship.
-- **`teleport()` vs `setPosition()`:** The implementation uses `player.teleport()` to force-sync position to the client each tick. If this causes rubber-banding or jitter, switch to `player.setPosition()` + `player.networkHandler.syncWithPlayerPosition()` instead.
-- **Jump handling:** If the Y-snap (`newPlayerPos = new Vec3d(..., deckWorldY, ...)`) prevents the player from jumping, add a guard: only snap Y if `player.isOnGround()` or `player.getVelocity().y <= 0`.
+| Player jumps on deck | Jump arc not interrupted — Y-snap skipped while `velocity.y > 0` |
+| Vanilla boat spawned | No effect — dragger only runs from `ShipBoatEntity.tick()` |
