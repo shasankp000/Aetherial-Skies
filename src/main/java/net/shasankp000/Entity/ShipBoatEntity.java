@@ -121,10 +121,8 @@ public class ShipBoatEntity extends BoatEntity {
 
         cachedBounds = hull.computeBounds();
 
-        // Expand AABB to full hull footprint/height so deck collision is on the real ship entity.
-        float width = (float) Math.max(cachedBounds.widthX(), cachedBounds.widthZ());
-        float height = (float) cachedBounds.height();
-        cachedDimensions = EntityDimensions.changing(width, height);
+        // Keep AABB at vanilla boat size; deck walking is handled by dragger logic in Phase 2.
+        cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
 
         ShipPhysicsState newState = new ShipPhysicsState();
         newState.position = this.getPos();
@@ -234,6 +232,12 @@ public class ShipBoatEntity extends BoatEntity {
     public void tick() {
         // Run base entity lifecycle but skip BoatEntity's vanilla buoyancy/movement.
         ((EntityTickInvoker) this).invokeBaseTick();
+
+        // 1.20.1 mappings in this workspace do not expose updatePassengerPositions(),
+        // so update each passenger explicitly.
+        for (Entity passenger : this.getPassengerList()) {
+            this.updatePassengerPosition(passenger, Entity::setPosition);
+        }
 
         if (!this.getWorld().isClient() && physicsEngine != null) {
             physicsEngine.syncFrom(this);
