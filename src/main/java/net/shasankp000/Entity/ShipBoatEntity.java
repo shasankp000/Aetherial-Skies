@@ -16,7 +16,6 @@ import net.shasankp000.Ship.ShipCrateService;
 import net.shasankp000.Ship.ShipHullData;
 import net.shasankp000.Ship.Physics.ShipPhysicsEngine;
 import net.shasankp000.Ship.Physics.ShipPhysicsState;
-import net.shasankp000.mixin.EntityTickInvoker;
 
 import java.util.HashSet;
 import java.util.UUID;
@@ -121,7 +120,7 @@ public class ShipBoatEntity extends BoatEntity {
 
         cachedBounds = hull.computeBounds();
 
-        // Keep AABB at vanilla boat size; deck walking is handled by dragger logic in Phase 2.
+        // Keep AABB at vanilla boat size; deck walking handled by dragger in Phase 2.
         cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
 
         ShipPhysicsState newState = new ShipPhysicsState();
@@ -230,11 +229,13 @@ public class ShipBoatEntity extends BoatEntity {
 
     @Override
     public void tick() {
-        // Run base entity lifecycle but skip BoatEntity's vanilla buoyancy/movement.
-        ((EntityTickInvoker) this).invokeBaseTick();
+        // BoatEntity.tick() is allowed to run its first half via BoatEntityMixin
+        // (cancelled at updatePaddles). That means Entity.baseTick() has already
+        // been called by BoatEntity.tick() -> super.tick() before we get here.
+        // Do NOT call invokeBaseTick() again — it would double-tick base entity logic
+        // and corrupt interaction/flag state, preventing passenger mounting.
 
-        // 1.20.1 mappings in this workspace do not expose updatePassengerPositions(),
-        // so update each passenger explicitly.
+        // Reposition any current passengers each tick.
         for (Entity passenger : this.getPassengerList()) {
             this.updatePassengerPosition(passenger, Entity::setPosition);
         }

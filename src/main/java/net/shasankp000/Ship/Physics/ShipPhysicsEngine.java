@@ -1,5 +1,6 @@
 package net.shasankp000.Ship.Physics;
 
+import net.minecraft.block.BlockState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
@@ -11,6 +12,8 @@ import net.shasankp000.Ship.ShipHullData;
 /**
  * Core physics engine for ship simulation.
  * Handles gravity, drag, buoyancy, and collision with terrain.
+ * Water blocks are intentionally ignored in terrain collision —
+ * buoyancy handles vertical position when the hull is in water.
  */
 public class ShipPhysicsEngine {
 
@@ -149,13 +152,35 @@ public class ShipPhysicsEngine {
         return velocity;
     }
 
+    /**
+     * Handles terrain (solid block) collision only.
+     * Water blocks are explicitly excluded — treating water as a solid obstacle
+     * would push the ship upward on every tick, fighting buoyancy and causing
+     * the ship to hover above the water surface.
+     */
     private Vec3d handleTerrainCollision(Vec3d newPos) {
-        double minYOffset = hullBounds != null ? hullBounds.minY() : -0.5D;
-        double widthRadius = hullBounds != null
-                ? Math.max(hullBounds.widthX(), hullBounds.widthZ()) * 0.5D
-                : 1.0D;
-        double height = hullBounds != null ? hullBounds.height() : 1.0D;
+        if (hullBounds == null) {
+            return newPos;
+        }
 
+        double minYOffset = hullBounds.minY();
+        double widthRadius = Math.max(hullBounds.widthX(), hullBounds.widthZ()) * 0.5D;
+        double height = hullBounds.height();
+
+        // Check only the bottom-centre block of the hull for solid collision.
+        // This avoids false positives from water and keeps the check cheap.
+        int checkX = MathHelper.floor(newPos.x);
+        int checkY = MathHelper.floor(newPos.y + minYOffset);
+        int checkZ = MathHelper.floor(newPos.z);
+        BlockPos bottomPos = new BlockPos(checkX, checkY, checkZ);
+        BlockState bottomBlock = world.getBlockState(bottomPos);
+
+        // Only react to solid blocks — skip air, water, lava, and other fluids.
+        if (!bottomBlock.isSolidBlock(world, bottomPos)) {
+            return newPos;
+        }
+
+        // Solid block detected at hull bottom — push ship up clear of it.
         Box shipBounds = new Box(
                 newPos.x - widthRadius,
                 newPos.y + minYOffset,
@@ -165,14 +190,17 @@ public class ShipPhysicsEngine {
                 newPos.z + widthRadius
         );
 
-        if (!world.isSpaceEmpty(null, shipBounds)) {
-            for (int i = 0; i < 10; i++) {
-                newPos = newPos.add(0.0D, 0.25D, 0.0D);
-                shipBounds = shipBounds.offset(0.0D, 0.25D, 0.0D);
-                if (world.isSpaceEmpty(null, shipBounds)) {
-                    state.velocity = new Vec3d(state.velocity.x, Math.max(0.0D, state.velocity.y), state.velocity.z);
-                    break;
-                }
+        for (int i = 0; i < 10; i++) {
+            newPos = newPos.add(0.0D, 0.25D, 0.0D);
+            shipBounds = shipBounds.offset(0.0D, 0.25D, 0.0D);
+            BlockPos newBottomPos = new BlockPos(
+                MathHelper.floor(newPos.x),
+                MathHelper.floor(newPos.y + minYOffset),
+                MathHelper.floor(newPos.z)
+            );
+            if (!world.getBlockState(newBottomPos).isSolidBlock(world, newBottomPos)) {
+                state.velocity = new Vec3d(state.velocity.x, Math.max(0.0D, state.velocity.y), state.velocity.z);
+                break;
             }
         }
 
