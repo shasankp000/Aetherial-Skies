@@ -37,8 +37,20 @@ public final class ShipDeployService {
             return new DeployResult(false, "Deployment blocked: no water/air clearance for ship spawn.");
         }
 
+        // Construct with a temporary Y — will be corrected below after hull data is set.
         ShipBoatEntity shipBoat = new ShipBoatEntity(world, spawnPos.x, spawnPos.y, spawnPos.z);
+
+        // setHullData must be called before the Y correction so computeBounds() has block data.
         shipBoat.setHullData(hullData);
+
+        // Correct spawn Y so the hull bottom (entity.getY() + bounds.minY()) sits exactly
+        // at the water surface (spawnPos.y). Without this correction, the vanilla-sized AABB
+        // sits above the water and the physics engine detects zero submersion, leaving the
+        // ship hovering with a gap above the water.
+        ShipHullData.HullBounds bounds = hullData.computeBounds();
+        double correctedY = spawnPos.y - bounds.minY();
+        shipBoat.setPosition(spawnPos.x, correctedY, spawnPos.z);
+
         float shipYaw = player.getYaw() - hullData.helmYawDegrees();
         shipBoat.setYaw(shipYaw);
         shipBoat.setBodyYaw(shipYaw);
@@ -73,7 +85,10 @@ public final class ShipDeployService {
             if (!world.getBlockState(bodyPos).isAir() || !world.getBlockState(headPos).isAir()) {
                 continue;
             }
-            return new Vec3d(baseX + 0.5D, y + 1.05D, baseZ + 0.5D);
+            // Return the water surface Y (top face of the water block).
+            // ShipDeployService will offset entity.getY() by -bounds.minY() to align
+            // the hull bottom with this surface.
+            return new Vec3d(baseX + 0.5D, y + 1.0D, baseZ + 0.5D);
         }
 
         return null;
