@@ -123,8 +123,9 @@ public class ShipBoatEntity extends BoatEntity {
 
         cachedBounds = hull.computeBounds();
 
-        // Keep ship core collider at vanilla size so it cannot block itself against its own collision parts.
-        cachedDimensions = EntityDimensions.changing(1.375f, 0.5625f);
+        // Collision parts are disabled; use a widened core collider for deck walkability.
+        float hullWidth = (float) Math.max(1.375D, Math.max(Math.abs(cachedBounds.minX()), Math.abs(cachedBounds.maxX())) * 2.0D);
+        cachedDimensions = EntityDimensions.changing(hullWidth, 0.5625f);
         waterlineOffset = 0.0f;
         this.calculateDimensions();
     }
@@ -251,14 +252,18 @@ public class ShipBoatEntity extends BoatEntity {
             return 0.0f;
         }
 
-        int submergedBlocks = 0;
         int totalBlocks = hull.blocks().size();
+        int sampleCount = Math.min(totalBlocks, 128);
+        int step = Math.max(1, totalBlocks / sampleCount);
+        int submergedBlocks = 0;
+        int checkedBlocks = 0;
 
         double yawRad = Math.toRadians(-this.getYaw());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
 
-        for (ShipCrateService.PackedBlock block : hull.blocks()) {
+        for (int i = 0; i < totalBlocks && checkedBlocks < sampleCount; i += step) {
+            ShipCrateService.PackedBlock block = hull.blocks().get(i);
             Vec3d offset = block.localOffset();
             double worldX = this.getX() + (offset.x * cos - offset.z * sin);
             double worldY = this.getY() + offset.y - waterlineOffset;
@@ -268,9 +273,10 @@ public class ShipBoatEntity extends BoatEntity {
             if (this.getWorld().getFluidState(blockPos).isIn(FluidTags.WATER)) {
                 submergedBlocks++;
             }
+            checkedBlocks++;
         }
 
-        cachedSubmersion = (float) submergedBlocks / (float) totalBlocks;
+        cachedSubmersion = checkedBlocks == 0 ? 0.0f : (float) submergedBlocks / (float) checkedBlocks;
         return cachedSubmersion;
     }
 

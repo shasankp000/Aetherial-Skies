@@ -17,11 +17,12 @@ public final class ShipDeployService {
     }
 
     public static DeployResult deployFromCrate(ServerPlayerEntity player, ServerWorld world, BlockPos clickedPos, ItemStack stack) {
-        if (!stack.hasNbt() || !stack.getNbt().contains(SHIP_CRATE_TAG, 10)) {
+        NbtCompound stackNbt = stack.getNbt();
+        if (stackNbt == null || !stackNbt.contains(SHIP_CRATE_TAG, 10)) {
             return new DeployResult(false, "This crate is empty.");
         }
 
-        NbtCompound shipTag = stack.getNbt().getCompound(SHIP_CRATE_TAG);
+        NbtCompound shipTag = stackNbt.getCompound(SHIP_CRATE_TAG);
         ShipHullData hullData = ShipHullData.fromCrateTag(shipTag);
         if (hullData.blocks().isEmpty()) {
             return new DeployResult(false, "This crate contains no ship blocks.");

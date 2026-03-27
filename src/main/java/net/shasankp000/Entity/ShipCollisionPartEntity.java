@@ -116,48 +116,11 @@ public class ShipCollisionPartEntity extends Entity {
 
     @Override
     public void tick() {
-        // Skip vanilla entity tick work; this entity is manually positioned each tick.
+        // Collision-part system is disabled; loaded legacy entities should self-prune.
         this.age++;
-        if (this.getWorld().isClient()) {
-            return;
-        }
-
-        if (ownerShipId == null) {
+        if (!this.getWorld().isClient()) {
             this.discard();
-            return;
         }
-
-        ShipBoatEntity ship = resolveOwner();
-        if (ship == null) {
-            missingOwnerTicks++;
-            if (missingOwnerTicks > 120) {
-                this.discard();
-            }
-            return;
-        }
-        missingOwnerTicks = 0;
-
-        double yawRad = Math.toRadians(-ship.getYaw());
-        double cos = Math.cos(yawRad);
-        double sin = Math.sin(yawRad);
-        double rotatedX = localOffset.x * cos - localOffset.z * sin;
-        double rotatedZ = localOffset.x * sin + localOffset.z * cos;
-
-        double centerX = ship.getX() + rotatedX;
-        double centerY = ship.getY() + localOffset.y;
-        double centerZ = ship.getZ() + rotatedZ;
-
-        this.setPosition(centerX, centerY, centerZ);
-        this.setYaw(ship.getYaw());
-        this.setPitch(ship.getPitch());
-        this.setBoundingBox(new Box(
-                centerX - halfSize.x,
-                centerY - halfSize.y,
-                centerZ - halfSize.z,
-                centerX + halfSize.x,
-                centerY + halfSize.y,
-                centerZ + halfSize.z
-        ));
     }
 
     @Override
