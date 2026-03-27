@@ -15,6 +15,14 @@ public class ShipPhysicsState {
     
     public float mass;
     
+    public ShipPhysicsState() {
+        this.position = Vec3d.ZERO;
+        this.velocity = Vec3d.ZERO;
+        this.yaw = 0.0f;
+        this.angularVelocityYaw = 0.0f;
+        this.mass = 1.0f;
+    }
+    
     public ShipPhysicsState(Vec3d position, float mass) {
         this.position = position;
         this.velocity = Vec3d.ZERO;
@@ -39,4 +47,3 @@ public class ShipPhysicsState {
                 yaw);
     }
 }
-

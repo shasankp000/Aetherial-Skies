@@ -5,7 +5,9 @@
 	"mixins": [
       "BlockMixin",
 		"WorldMixin",
-		"PlayerEntityMixin"
+		"PlayerEntityMixin",
+		"BoatEntityMixin",
+		"EntityTickInvoker"
 	],
 	"client": [
 		"ClientPlayerInteractionManagerMixin",
