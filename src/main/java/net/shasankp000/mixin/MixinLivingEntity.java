@@ -10,14 +10,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Server-side deck-snap mixin.
+ * Server-side position-correction mixin.
  *
- * Injects at HEAD of LivingEntity#travel so that BEFORE vanilla physics
- * runs for this tick, we snap the player flush onto any ship deck they
- * are standing on or have just fallen through.
+ * Fires at HEAD of LivingEntity#travel (before vanilla physics runs) and
+ * handles two cases via ShipDeckSnapHelper:
  *
- * All footprint/floor-Y logic lives in ShipDeckSnapHelper so that this
- * mixin's static methods can remain private (Mixin requirement).
+ *  1. Player is INSIDE the hull (swam up from below) -> eject downward.
+ *  2. Player is ON TOP of / just fell through deck   -> snap upward.
  */
 @Mixin(LivingEntity.class)
 public abstract class MixinLivingEntity {
@@ -25,27 +24,36 @@ public abstract class MixinLivingEntity {
     @Inject(method = "travel", at = @At("HEAD"))
     private void onTravelHead(Vec3d movementInput, CallbackInfo ci) {
         LivingEntity self = (LivingEntity) (Object) this;
-
         if (!(self instanceof PlayerEntity player)) return;
         if (player.isSpectator()) return;
         if (player.getWorld().isClient()) return;
 
-        double bestFloorY = ShipDeckSnapHelper.findBestFloorY(
-                player.getX(), player.getZ(), player.getY());
-        if (Double.isNaN(bestFloorY)) return;
+        double px = player.getX(), pz = player.getZ(), feetY = player.getY();
 
-        if (player.getVelocity().y > 0.001D) return; // jumping — don't snap
+        // --- Case 1: player is inside the hull -> eject downward ---
+        double ejectY = ShipDeckSnapHelper.findHullEjectY(px, pz, feetY);
+        if (!Double.isNaN(ejectY)) {
+            player.setPosition(px, ejectY, pz);
+            Vec3d vel = player.getVelocity();
+            // Kill upward velocity so they cannot immediately re-enter
+            player.setVelocity(vel.x, Math.min(vel.y, 0.0D), vel.z);
+            player.velocityModified = true;
+            return; // skip top-snap this tick
+        }
 
-        double feetY = player.getY();
-        if (feetY < bestFloorY) {
-            // Fell through: push back up
-            player.setPosition(player.getX(), bestFloorY, player.getZ());
+        // --- Case 2: player on deck or just fell through -> snap up ---
+        if (player.getVelocity().y > 0.001D) return; // jumping
+
+        double floorY = ShipDeckSnapHelper.findBestFloorY(px, pz, feetY);
+        if (Double.isNaN(floorY)) return;
+
+        if (feetY < floorY) {
+            player.setPosition(px, floorY, pz);
             Vec3d vel = player.getVelocity();
             player.setVelocity(vel.x, 0.0D, vel.z);
             player.setOnGround(true);
-        } else if (feetY <= bestFloorY + ShipDeckSnapHelper.MAX_ABOVE) {
-            // Resting on or fractionally above deck: snap flush
-            player.setPosition(player.getX(), bestFloorY, player.getZ());
+        } else if (feetY <= floorY + ShipDeckSnapHelper.MAX_ABOVE) {
+            player.setPosition(px, floorY, pz);
             Vec3d vel = player.getVelocity();
             if (vel.y < 0) player.setVelocity(vel.x, 0.0D, vel.z);
             player.setOnGround(true);

@@ -11,13 +11,10 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Client-side mirror of the deck-snap logic.
+ * Client-side mirror of MixinLivingEntity's position-correction logic.
  *
- * Without this, the client simulates its own fall each tick, disagrees
- * with the server's correction, and the player rubber-bands visually.
- *
- * Delegates entirely to ShipDeckSnapHelper so this mixin has no
- * non-private static methods (Mixin requirement).
+ * Mirrors both the hull-eject and deck-snap cases so client and server
+ * always agree on the player's Y, preventing visual rubber-band.
  */
 @Environment(EnvType.CLIENT)
 @Mixin(ClientPlayerEntity.class)
@@ -28,16 +25,26 @@ public abstract class MixinClientPlayerEntity {
         ClientPlayerEntity self = (ClientPlayerEntity) (Object) this;
         if (self.isSpectator()) return;
 
-        double bestFloorY = ShipDeckSnapHelper.findBestFloorY(
-                self.getX(), self.getZ(), self.getY());
-        if (Double.isNaN(bestFloorY)) return;
+        double px = self.getX(), pz = self.getZ(), feetY = self.getY();
 
-        if (self.getVelocity().y > 0.001D) return; // jumping — don't snap
+        // --- Case 1: inside hull -> eject downward ---
+        double ejectY = ShipDeckSnapHelper.findHullEjectY(px, pz, feetY);
+        if (!Double.isNaN(ejectY)) {
+            self.setPosition(px, ejectY, pz);
+            Vec3d vel = self.getVelocity();
+            self.setVelocity(vel.x, Math.min(vel.y, 0.0D), vel.z);
+            return;
+        }
 
-        double feetY = self.getY();
-        if (feetY < bestFloorY
-                || (feetY >= bestFloorY && feetY <= bestFloorY + ShipDeckSnapHelper.MAX_ABOVE)) {
-            self.setPosition(self.getX(), bestFloorY, self.getZ());
+        // --- Case 2: on deck or just fell through -> snap up ---
+        if (self.getVelocity().y > 0.001D) return; // jumping
+
+        double floorY = ShipDeckSnapHelper.findBestFloorY(px, pz, feetY);
+        if (Double.isNaN(floorY)) return;
+
+        if (feetY < floorY
+                || (feetY >= floorY && feetY <= floorY + ShipDeckSnapHelper.MAX_ABOVE)) {
+            self.setPosition(px, floorY, pz);
             Vec3d vel = self.getVelocity();
             if (vel.y < 0) self.setVelocity(vel.x, 0.0D, vel.z);
             self.setOnGround(true);
