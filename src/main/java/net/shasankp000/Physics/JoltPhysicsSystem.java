@@ -1,8 +1,6 @@
 package net.shasankp000.Physics;
 
 import com.github.stephengold.joltjni.*;
-import com.github.stephengold.joltjni.enumerate.EMotionType;
-import com.github.stephengold.joltjni.enumerate.EActivation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,13 +22,13 @@ public final class JoltPhysicsSystem {
 
     public static final int LAYER_TERRAIN = 0;
     public static final int LAYER_SHIP    = 1;
-    private static final int NUM_LAYERS   = 2;
+    private static final int NUM_LAYERS    = 2;
+    private static final int NUM_BP_LAYERS = 2; // BP 0 = terrain, BP 1 = ship
 
-    // Jolt tuning constants
-    private static final int MAX_BODIES          = 1024;
-    private static final int NUM_BODY_MUTEXES     = 0;    // 0 = auto
-    private static final int MAX_BODY_PAIRS       = 4096;
-    private static final int MAX_CONTACT_CONSTRAINTS = 2048;
+    private static final int MAX_BODIES              = 1024;
+    private static final int NUM_BODY_MUTEXES         = 0;    // 0 = auto
+    private static final int MAX_BODY_PAIRS           = 4096;
+    private static final int MAX_CONTACT_CONSTRAINTS  = 2048;
 
     private static final float FIXED_TIMESTEP = 1f / 20f;
 
@@ -39,14 +37,14 @@ public final class JoltPhysicsSystem {
     public static JoltPhysicsSystem getInstance() { return INSTANCE; }
     private JoltPhysicsSystem() {}
 
-    // ---- Jolt objects (allocated in init, freed in destroy) ---------------
-    private TempAllocator      tempAllocator;
-    private JobSystem          jobSystem;
-    private BroadPhaseLayerInterface     bpLayerInterface;
-    private ObjectVsBroadPhaseLayerFilter ovsBpFilter;
-    private ObjectLayerPairFilter         oLayerFilter;
-    private PhysicsSystem      physicsSystem;
-    private BodyInterface      bodyInterface;
+    // ---- Jolt objects -----------------------------------------------------
+    private TempAllocator                      tempAllocator;
+    private JobSystem                          jobSystem;
+    private BroadPhaseLayerInterfaceTable      bpLayerInterface;
+    private ObjectLayerPairFilterTable         oLayerFilter;
+    private ObjectVsBroadPhaseLayerFilterTable ovsBpFilter;
+    private PhysicsSystem                      physicsSystem;
+    private BodyInterface                      bodyInterface;
 
     private volatile boolean initialised = false;
 
@@ -58,38 +56,39 @@ public final class JoltPhysicsSystem {
         if (initialised) return;
         LOGGER.info("[JoltPhysicsSystem] Initialising Jolt Physics...");
 
-        // Must be called once before any Jolt object is created
-        Jolt.load();
+        // Native library already loaded by JoltNativeLoader.load() in onInitialize().
+        // Must call registerDefaultAllocator() before any other Jolt object is created.
         Jolt.registerDefaultAllocator();
         Jolt.installDefaultAssertCallback();
         Jolt.installDefaultTraceCallback();
+        Jolt.newFactory();
         Jolt.registerTypes();
 
         tempAllocator = new TempAllocatorImpl(16 * 1024 * 1024); // 16 MB
-        jobSystem     = new JobSystemThreadPool(
-            Jolt.maxPhysicsJobs(), Jolt.maxPhysicsBarriers(),
+
+        // JobSystemThreadPool(maxJobs, maxBarriers, numThreads)
+        jobSystem = new JobSystemThreadPool(
+            Jolt.cMaxPhysicsJobs,
+            Jolt.cMaxPhysicsBarriers,
             Math.max(1, Runtime.getRuntime().availableProcessors() - 1)
         );
 
-        // Broad-phase layers: TERRAIN -> BP layer 0, SHIP -> BP layer 1
-        bpLayerInterface = new BroadPhaseLayerInterfaceTable(NUM_LAYERS, 2);
-        ((BroadPhaseLayerInterfaceTable) bpLayerInterface)
-            .mapObjectToBroadPhaseLayer(LAYER_TERRAIN, new BroadPhaseLayer(0))
-            .mapObjectToBroadPhaseLayer(LAYER_SHIP,    new BroadPhaseLayer(1));
+        // Map object layers to broad-phase layers.
+        // LAYER_TERRAIN -> BP 0, LAYER_SHIP -> BP 1
+        bpLayerInterface = new BroadPhaseLayerInterfaceTable(NUM_LAYERS, NUM_BP_LAYERS);
+        bpLayerInterface.mapObjectToBroadPhaseLayer(LAYER_TERRAIN, 0);
+        bpLayerInterface.mapObjectToBroadPhaseLayer(LAYER_SHIP,    1);
 
-        // Filters: SHIP collides with TERRAIN, not with other SHIPs
-        ovsBpFilter = new ObjectVsBroadPhaseLayerFilterTable(
-            bpLayerInterface, NUM_LAYERS, 2);
-        ((ObjectVsBroadPhaseLayerFilterTable) ovsBpFilter)
-            .disablePair(LAYER_TERRAIN, 1)
-            .enablePair(LAYER_SHIP,    0)
-            .disablePair(LAYER_SHIP,   1);
-
+        // All collisions disabled by default; enable only SHIP <-> TERRAIN.
         oLayerFilter = new ObjectLayerPairFilterTable(NUM_LAYERS);
-        ((ObjectLayerPairFilterTable) oLayerFilter)
-            .disablePair(LAYER_TERRAIN, LAYER_TERRAIN)
-            .enablePair(LAYER_SHIP,    LAYER_TERRAIN)
-            .disablePair(LAYER_SHIP,   LAYER_SHIP);
+        oLayerFilter.enableCollision(LAYER_SHIP, LAYER_TERRAIN);
+
+        // Broad-phase vs object-layer filter: automatically derived from
+        // the pair filter + layer interface.
+        ovsBpFilter = new ObjectVsBroadPhaseLayerFilterTable(
+            bpLayerInterface, NUM_BP_LAYERS,
+            oLayerFilter, NUM_LAYERS
+        );
 
         physicsSystem = new PhysicsSystem();
         physicsSystem.init(
@@ -105,7 +104,7 @@ public final class JoltPhysicsSystem {
 
     /**
      * Steps the simulation by exactly one Minecraft tick (1/20 s).
-     * Call from ServerTickEvents.END_SERVER_TICK.
+     * Called from ServerTickEvents.END_SERVER_TICK.
      */
     public void stepSimulation() {
         if (!initialised) return;
@@ -116,10 +115,13 @@ public final class JoltPhysicsSystem {
         if (!initialised) return;
         LOGGER.info("[JoltPhysicsSystem] Shutting down Jolt Physics...");
 
-        // Free in reverse order of allocation
+        Jolt.unregisterTypes();
+        Jolt.destroyFactory();
+
+        // Free in reverse order of allocation.
         physicsSystem.close();
-        oLayerFilter.close();
         ovsBpFilter.close();
+        oLayerFilter.close();
         bpLayerInterface.close();
         jobSystem.close();
         tempAllocator.close();
@@ -129,7 +131,7 @@ public final class JoltPhysicsSystem {
     }
 
     // -----------------------------------------------------------------------
-    // Accessors for later steps
+    // Accessors
     // -----------------------------------------------------------------------
 
     public PhysicsSystem getPhysicsSystem() { return physicsSystem; }
