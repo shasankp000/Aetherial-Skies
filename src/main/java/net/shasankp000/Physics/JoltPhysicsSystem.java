@@ -1,20 +1,31 @@
 package net.shasankp000.Physics;
 
 import com.github.stephengold.joltjni.*;
+import com.github.stephengold.joltjni.enumerate.EActivation;
+import com.github.stephengold.joltjni.enumerate.EMotionType;
+import net.minecraft.util.math.Vec3d;
+import net.shasankp000.Ship.ShipHullData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * Singleton that owns and manages the Jolt PhysicsSystem for Aetherial Skies.
  *
  * Object layers:
- *   0 = TERRAIN  - static world blocks, never moves
- *   1 = SHIP     - kinematic ship bodies, position set each tick
+ *   0 = TERRAIN  – static world blocks, never moves
+ *   1 = SHIP     – kinematic ship bodies, position set each tick by ShipPhysicsEngine
  *
  * Lifecycle:
- *   init()            - called once on SERVER_STARTED
- *   stepSimulation()  - called every SERVER_TICK (1/20 s)
- *   destroy()         - called on SERVER_STOPPING
+ *   init()                    – called once on SERVER_STARTED
+ *   registerShipBody()        – called when a ship is deployed
+ *   updateBodyTransform()     – called every tick per ship (after PD controller)
+ *   stepSimulation()          – called every SERVER_TICK after all body updates
+ *   removeShipBody()          – called when a ship is destroyed/docked
+ *   destroy()                 – called on SERVER_STOPPING
  */
 public final class JoltPhysicsSystem {
 
@@ -23,12 +34,12 @@ public final class JoltPhysicsSystem {
     public static final int LAYER_TERRAIN = 0;
     public static final int LAYER_SHIP    = 1;
     private static final int NUM_LAYERS    = 2;
-    private static final int NUM_BP_LAYERS = 2; // BP 0 = terrain, BP 1 = ship
+    private static final int NUM_BP_LAYERS = 2;
 
-    private static final int MAX_BODIES              = 1024;
-    private static final int NUM_BODY_MUTEXES         = 0;    // 0 = auto
-    private static final int MAX_BODY_PAIRS           = 4096;
-    private static final int MAX_CONTACT_CONSTRAINTS  = 2048;
+    private static final int MAX_BODIES             = 1024;
+    private static final int NUM_BODY_MUTEXES        = 0;
+    private static final int MAX_BODY_PAIRS          = 4096;
+    private static final int MAX_CONTACT_CONSTRAINTS = 2048;
 
     private static final float FIXED_TIMESTEP = 1f / 20f;
 
@@ -46,6 +57,9 @@ public final class JoltPhysicsSystem {
     private PhysicsSystem                      physicsSystem;
     private BodyInterface                      bodyInterface;
 
+    /** Maps ship UUID → Jolt BodyID value (int). */
+    private final Map<UUID, Integer> shipBodyIds = new HashMap<>();
+
     private volatile boolean initialised = false;
 
     // -----------------------------------------------------------------------
@@ -56,35 +70,27 @@ public final class JoltPhysicsSystem {
         if (initialised) return;
         LOGGER.info("[JoltPhysicsSystem] Initialising Jolt Physics...");
 
-        // Native library already loaded by JoltNativeLoader.load() in onInitialize().
-        // Must call registerDefaultAllocator() before any other Jolt object is created.
         Jolt.registerDefaultAllocator();
         Jolt.installDefaultAssertCallback();
         Jolt.installDefaultTraceCallback();
         Jolt.newFactory();
         Jolt.registerTypes();
 
-        tempAllocator = new TempAllocatorImpl(16 * 1024 * 1024); // 16 MB
+        tempAllocator = new TempAllocatorImpl(16 * 1024 * 1024);
 
-        // JobSystemThreadPool(maxJobs, maxBarriers, numThreads)
         jobSystem = new JobSystemThreadPool(
             Jolt.cMaxPhysicsJobs,
             Jolt.cMaxPhysicsBarriers,
             Math.max(1, Runtime.getRuntime().availableProcessors() - 1)
         );
 
-        // Map object layers to broad-phase layers.
-        // LAYER_TERRAIN -> BP 0, LAYER_SHIP -> BP 1
         bpLayerInterface = new BroadPhaseLayerInterfaceTable(NUM_LAYERS, NUM_BP_LAYERS);
         bpLayerInterface.mapObjectToBroadPhaseLayer(LAYER_TERRAIN, 0);
         bpLayerInterface.mapObjectToBroadPhaseLayer(LAYER_SHIP,    1);
 
-        // All collisions disabled by default; enable only SHIP <-> TERRAIN.
         oLayerFilter = new ObjectLayerPairFilterTable(NUM_LAYERS);
         oLayerFilter.enableCollision(LAYER_SHIP, LAYER_TERRAIN);
 
-        // Broad-phase vs object-layer filter: automatically derived from
-        // the pair filter + layer interface.
         ovsBpFilter = new ObjectVsBroadPhaseLayerFilterTable(
             bpLayerInterface, NUM_BP_LAYERS,
             oLayerFilter, NUM_LAYERS
@@ -102,23 +108,165 @@ public final class JoltPhysicsSystem {
         LOGGER.info("[JoltPhysicsSystem] Jolt Physics ready.");
     }
 
+    // -----------------------------------------------------------------------
+    // Ship body management
+    // -----------------------------------------------------------------------
+
+    /**
+     * Registers a kinematic box body for the given ship.
+     * The box dimensions are derived from the hull AABB.
+     * Must be called on the server thread after init().
+     */
+    public synchronized void registerShipBody(UUID shipId, ShipHullData hullData, Vec3d initialPos, float initialYaw) {
+        if (!initialised) return;
+        if (shipBodyIds.containsKey(shipId)) return; // already registered
+
+        ShipHullData.HullBounds bounds = hullData.computeBounds();
+
+        // Half-extents for the box shape (Jolt uses half-extents).
+        float hx = (float) (bounds.widthX() / 2.0);
+        float hy = (float) (bounds.height()  / 2.0);
+        float hz = (float) (bounds.widthZ()  / 2.0);
+
+        // Jolt minimum half-extent is 0.05 to avoid degenerate shapes.
+        hx = Math.max(hx, 0.05f);
+        hy = Math.max(hy, 0.05f);
+        hz = Math.max(hz, 0.05f);
+
+        BoxShapeSettings shapeSettings = new BoxShapeSettings(hx, hy, hz);
+        ShapeResult shapeResult = shapeSettings.create();
+        if (shapeResult.hasError()) {
+            LOGGER.error("[JoltPhysicsSystem] Failed to create BoxShape for ship {}: {}",
+                    shipId, shapeResult.getError());
+            return;
+        }
+        Shape shape = shapeResult.get();
+
+        // Centre of the box in world space = ship position + hull centre offset.
+        float cx = (float) (initialPos.x + (bounds.minX() + bounds.maxX()) / 2.0);
+        float cy = (float) (initialPos.y + (bounds.minY() + bounds.maxY()) / 2.0);
+        float cz = (float) (initialPos.z + (bounds.minZ() + bounds.maxZ()) / 2.0);
+
+        // Convert yaw (degrees, Y-axis) to a Jolt quaternion.
+        float halfYaw = (float) Math.toRadians(initialYaw / 2.0);
+        float qw = (float) Math.cos(halfYaw);
+        float qy = (float) Math.sin(halfYaw);
+
+        BodyCreationSettings settings = new BodyCreationSettings(
+            shape,
+            new RVec3(cx, cy, cz),
+            new Quat(0f, qy, 0f, qw),
+            EMotionType.Kinematic,
+            LAYER_SHIP
+        );
+
+        Body body = bodyInterface.createBody(settings);
+        if (body == null) {
+            LOGGER.error("[JoltPhysicsSystem] createBody returned null for ship {} (body limit reached?)", shipId);
+            return;
+        }
+
+        bodyInterface.addBody(body.getId(), EActivation.Activate);
+        shipBodyIds.put(shipId, body.getId().getIndexAndSequenceNumber());
+        LOGGER.info("[JoltPhysicsSystem] Registered kinematic body for ship {} (bodyId={})",
+                shipId, body.getId().getIndexAndSequenceNumber());
+    }
+
+    /**
+     * Moves the Jolt kinematic body to match the position/yaw computed by
+     * ShipPhysicsEngine this tick. Call this BEFORE stepSimulation().
+     */
+    public void updateBodyTransform(UUID shipId, Vec3d pos, float yawDegrees,
+                                    ShipHullData hullData) {
+        if (!initialised) return;
+        Integer rawId = shipBodyIds.get(shipId);
+        if (rawId == null) return;
+
+        ShipHullData.HullBounds bounds = hullData.computeBounds();
+        float cx = (float) (pos.x + (bounds.minX() + bounds.maxX()) / 2.0);
+        float cy = (float) (pos.y + (bounds.minY() + bounds.maxY()) / 2.0);
+        float cz = (float) (pos.z + (bounds.minZ() + bounds.maxZ()) / 2.0);
+
+        float halfYaw = (float) Math.toRadians(yawDegrees / 2.0);
+        float qw = (float) Math.cos(halfYaw);
+        float qy = (float) Math.sin(halfYaw);
+
+        BodyId bodyId = new BodyId(rawId);
+        bodyInterface.setPositionAndRotation(
+            bodyId,
+            new RVec3(cx, cy, cz),
+            new Quat(0f, qy, 0f, qw),
+            EActivation.Activate
+        );
+    }
+
+    /**
+     * Reads the current Jolt body centre-of-mass position back, converts it
+     * to the ship's worldOffset (pivot point), and returns it.
+     * Returns the fallback position if the body is not registered.
+     */
+    public Vec3d getBodyPosition(UUID shipId, ShipHullData hullData, Vec3d fallback) {
+        if (!initialised) return fallback;
+        Integer rawId = shipBodyIds.get(shipId);
+        if (rawId == null) return fallback;
+
+        ShipHullData.HullBounds bounds = hullData.computeBounds();
+        BodyId bodyId = new BodyId(rawId);
+        RVec3 centre = bodyInterface.getPosition(bodyId);
+
+        // Reverse the centre-offset to get the ship pivot position.
+        double px = centre.xx() - (bounds.minX() + bounds.maxX()) / 2.0;
+        double py = centre.yy() - (bounds.minY() + bounds.maxY()) / 2.0;
+        double pz = centre.zz() - (bounds.minZ() + bounds.maxZ()) / 2.0;
+        return new Vec3d(px, py, pz);
+    }
+
+    /**
+     * Removes and destroys the Jolt body for the given ship.
+     */
+    public synchronized void removeShipBody(UUID shipId) {
+        if (!initialised) return;
+        Integer rawId = shipBodyIds.remove(shipId);
+        if (rawId == null) return;
+
+        BodyId bodyId = new BodyId(rawId);
+        bodyInterface.removeBody(bodyId);
+        bodyInterface.destroyBody(bodyId);
+        LOGGER.info("[JoltPhysicsSystem] Removed body for ship {}", shipId);
+    }
+
+    // -----------------------------------------------------------------------
+    // Simulation step
+    // -----------------------------------------------------------------------
+
     /**
      * Steps the simulation by exactly one Minecraft tick (1/20 s).
-     * Called from ServerTickEvents.END_SERVER_TICK.
+     * Called from ShipTransformManager.tick() AFTER all updateBodyTransform() calls.
      */
     public void stepSimulation() {
         if (!initialised) return;
         physicsSystem.update(FIXED_TIMESTEP, 1, tempAllocator, jobSystem);
     }
 
+    // -----------------------------------------------------------------------
+    // Shutdown
+    // -----------------------------------------------------------------------
+
     public synchronized void destroy() {
         if (!initialised) return;
         LOGGER.info("[JoltPhysicsSystem] Shutting down Jolt Physics...");
 
+        // Remove all ship bodies before tearing down the system.
+        for (Integer rawId : shipBodyIds.values()) {
+            BodyId bodyId = new BodyId(rawId);
+            bodyInterface.removeBody(bodyId);
+            bodyInterface.destroyBody(bodyId);
+        }
+        shipBodyIds.clear();
+
         Jolt.unregisterTypes();
         Jolt.destroyFactory();
 
-        // Free in reverse order of allocation.
         physicsSystem.close();
         ovsBpFilter.close();
         oLayerFilter.close();

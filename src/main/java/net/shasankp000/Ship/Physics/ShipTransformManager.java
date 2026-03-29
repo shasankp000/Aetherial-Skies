@@ -3,6 +3,7 @@ package net.shasankp000.Ship.Physics;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.shasankp000.Physics.JoltPhysicsSystem;
 import net.shasankp000.Ship.Network.ShipTransformSyncS2CPacket;
 import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
@@ -16,12 +17,13 @@ import java.util.UUID;
 /**
  * Drives the physics tick loop for every active ShipStructure.
  *
- * Tick order per ship:
- *  1. syncFrom(structure)      — read current transform into engine state
- *  2. engine.tick()            — apply gravity / buoyancy / drag
- *  3. applyTo(structure)       — write result back to structure's transform
- *  4. ShipPassengerTracker     — carry players standing on this ship
- *  5. broadcast sync packet    — inform all online players of new transform
+ * Tick order per frame:
+ *  1. Per-ship: syncFrom → engine.tick() → applyTo
+ *     (engine.tick() internally calls JoltPhysicsSystem.updateBodyTransform)
+ *  2. JoltPhysicsSystem.stepSimulation()  — advance Jolt one tick
+ *  3. Per-ship: engine.readBackFromJolt() — write Jolt-authoritative pos back
+ *  4. Per-ship: ShipPassengerTracker.tick()
+ *  5. Per-ship: broadcast sync packet
  */
 public final class ShipTransformManager {
 
@@ -37,28 +39,45 @@ public final class ShipTransformManager {
         this.server = server;
     }
 
+    // ---- Ship lifecycle --------------------------------------------------
+
     public void onShipDeployed(ShipStructure structure) {
+        UUID shipId = structure.getShipId();
+
         ShipPhysicsState state = new ShipPhysicsState(
             structure.getTransform().worldOffset(),
             structure.getHullData().mass()
         );
         state.yaw = structure.getTransform().yaw();
 
-        ShipPhysicsEngine engine = new ShipPhysicsEngine(state, server.getOverworld());
+        ShipPhysicsEngine engine = new ShipPhysicsEngine(
+            shipId, state, server.getOverworld());
         engine.setHullData(structure.getHullData());
         engine.setHullBounds(structure.getHullData().computeBounds());
-        engines.put(structure.getShipId(), engine);
+        engines.put(shipId, engine);
+
+        // Register a kinematic Jolt body for this ship.
+        JoltPhysicsSystem.getInstance().registerShipBody(
+            shipId,
+            structure.getHullData(),
+            structure.getTransform().worldOffset(),
+            structure.getTransform().yaw()
+        );
     }
 
     public void onShipDestroyed(UUID shipId) {
         engines.remove(shipId);
+        JoltPhysicsSystem.getInstance().removeShipBody(shipId);
     }
+
+    // ---- Tick ------------------------------------------------------------
 
     public void tick() {
         if (server == null) return;
 
         List<ServerPlayerEntity> players = server.getPlayerManager().getPlayerList();
 
+        // --- Phase 1: run each ship's PD controller + push into Jolt ------
         for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
             if (!structure.isPhysicsActive()) continue;
 
@@ -68,15 +87,29 @@ public final class ShipTransformManager {
                 engine = engines.get(structure.getShipId());
             }
 
-            // 1-3: physics
             engine.syncFrom(structure);
-            engine.tick();
+            engine.tick();          // also calls updateBodyTransform internally
+            engine.applyTo(structure);
+        }
+
+        // --- Phase 2: step Jolt -------------------------------------------
+        JoltPhysicsSystem.getInstance().stepSimulation();
+
+        // --- Phase 3-5: read back, passengers, broadcast ------------------
+        for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
+            if (!structure.isPhysicsActive()) continue;
+
+            ShipPhysicsEngine engine = engines.get(structure.getShipId());
+            if (engine == null) continue;
+
+            // 3: read Jolt authoritative position back into engine state
+            engine.readBackFromJolt();
             engine.applyTo(structure);
 
             // 4: carry passengers
             ShipPassengerTracker.tick(structure, players);
 
-            // 5: broadcast
+            // 5: broadcast transform
             ShipTransform t = structure.getTransform();
             for (ServerPlayerEntity player : players) {
                 ShipTransformSyncS2CPacket.send(

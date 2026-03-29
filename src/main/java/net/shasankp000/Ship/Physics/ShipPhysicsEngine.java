@@ -6,32 +6,31 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.shasankp000.Physics.JoltPhysicsSystem;
 import net.shasankp000.Ship.ShipHullData;
 import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Transform.ShipTransform;
 
+import java.util.UUID;
+
 /**
  * Waterline-target physics engine.
  *
- * Instead of computing a submersion ratio and fighting density arithmetic,
- * we directly drive the hull bottom toward (waterSurfaceY - TARGET_DRAFT)
- * using a PD controller:
- *
- *   error    = targetY - hullBottomY          (positive = hull is too high, needs to go down... wait
- *              actually positive = hull bottom is below target = needs upward push)
- *   a_buoy   = BUOY_P * error - BUOY_D * vy   (proportional + derivative damping)
- *   a_net_y  = -GRAVITY + a_buoy              (only when hull is at or below water surface)
- *
- * When the hull is above the water entirely, a_buoy = 0 and the ship falls
- * under gravity until it touches the waterline.
- *
- * This model is immune to density misconfiguration and pool depth issues.
- * It will always settle the hull bottom at (waterSurface - TARGET_DRAFT).
+ * Each tick:
+ *  1. PD buoyancy/gravity controller computes new position + velocity.
+ *  2. The result is pushed into Jolt as a kinematic body move
+ *     (updateBodyTransform). Jolt then owns the position for collision
+ *     purposes.
+ *  3. After JoltPhysicsSystem.stepSimulation() (called by ShipTransformManager)
+ *     we read the authoritative position back from Jolt via getBodyPosition().
+ *     For kinematic bodies Jolt doesn't override our set position, but this
+ *     round-trip makes the code future-proof for switching to dynamic mode.
  */
 public class ShipPhysicsEngine {
 
     private final ShipPhysicsState state;
     private final World world;
+    private final UUID shipId;
 
     private ShipHullData.HullBounds hullBounds = null;
     private ShipHullData hullData   = null;
@@ -40,12 +39,12 @@ public class ShipPhysicsEngine {
     private int    waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 3;
 
-    // Whether the hull was touching water last tick (for drag switch).
     private boolean inWater = false;
 
-    public ShipPhysicsEngine(ShipPhysicsState state, World world) {
-        this.state = state;
-        this.world = world;
+    public ShipPhysicsEngine(UUID shipId, ShipPhysicsState state, World world) {
+        this.shipId = shipId;
+        this.state  = state;
+        this.world  = world;
     }
 
     // ---- Hull data -------------------------------------------------------
@@ -79,6 +78,12 @@ public class ShipPhysicsEngine {
 
     // ---- Tick ------------------------------------------------------------
 
+    /**
+     * Runs the PD physics controller, pushes the result into Jolt, then reads
+     * back the Jolt-authoritative position into state.position.
+     * ShipTransformManager must call JoltPhysicsSystem.stepSimulation() after
+     * all engine.tick() calls so the read-back reflects the stepped world.
+     */
     public void tick() {
         refreshWaterSurface();
 
@@ -89,14 +94,10 @@ public class ShipPhysicsEngine {
         double ay = -PhysicsConfig.GRAVITY;
 
         if (inWater) {
-            // Target: hull bottom sits TARGET_DRAFT below water surface.
-            double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
-            // error > 0 → hull bottom is above target → needs to go down (negative push, but
-            // wait: if hullBottomY < targetY then error < 0 → needs upward push)
-            double error = targetY - hullBottomY;  // positive = hull too high above bottom target = push down? No.
-            // Positive error means hullBottomY < targetY (hull is too low, submerged too deep) → push UP.
-            double a_buoy = PhysicsConfig.BUOY_P * error
-                          - PhysicsConfig.BUOY_D * state.velocity.y;
+            double targetY   = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
+            double error     = targetY - hullBottomY;
+            double a_buoy    = PhysicsConfig.BUOY_P * error
+                             - PhysicsConfig.BUOY_D * state.velocity.y;
             ay += a_buoy;
         }
 
@@ -105,9 +106,9 @@ public class ShipPhysicsEngine {
 
         // ---- Drag --------------------------------------------------------
         double drag = PhysicsConfig.AIR_DRAG + (inWater ? PhysicsConfig.WATER_DRAG : 0.0);
-        newVy          = newVy            * (1.0 - drag);
-        double newVx   = state.velocity.x * (1.0 - drag);
-        double newVz   = state.velocity.z * (1.0 - drag);
+        newVy        = newVy            * (1.0 - drag);
+        double newVx = state.velocity.x * (1.0 - drag);
+        double newVz = state.velocity.z * (1.0 - drag);
 
         state.velocity = new Vec3d(newVx, newVy, newVz);
         state.velocity = clipVelocity(state.velocity);
@@ -115,13 +116,35 @@ public class ShipPhysicsEngine {
         // ---- Integrate position ------------------------------------------
         state.position = state.position.add(state.velocity);
 
-        // ---- Hard floor: never let hull bottom go below solid terrain ----
+        // ---- Hard floor guard -------------------------------------------
         state.position = preventFloorPenetration(state.position);
 
         // ---- Settle ------------------------------------------------------
         if (isAtRest()) {
             state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
         }
+
+        // ---- Push into Jolt (kinematic move) ----------------------------
+        // Jolt body tracks our computed position so collision broadphase is
+        // always up to date. stepSimulation() is called by ShipTransformManager
+        // after all ships have been updated.
+        if (hullData != null) {
+            JoltPhysicsSystem.getInstance().updateBodyTransform(
+                shipId, state.position, state.yaw, hullData);
+        }
+    }
+
+    /**
+     * Called by ShipTransformManager AFTER stepSimulation() to read back the
+     * Jolt-authoritative position. For kinematic bodies this is identical to
+     * what we pushed in tick(), but having this call makes it trivial to
+     * switch to dynamic mode later.
+     */
+    public void readBackFromJolt() {
+        if (hullData == null) return;
+        Vec3d joltPos = JoltPhysicsSystem.getInstance()
+                .getBodyPosition(shipId, hullData, state.position);
+        state.position = joltPos;
     }
 
     // ---- Water surface ---------------------------------------------------
@@ -135,29 +158,18 @@ public class ShipPhysicsEngine {
         }
     }
 
-    /**
-     * Scans downward from the hull bottom position to find the first water
-     * block column, returning the Y of the water surface (top of water block).
-     * Returns NaN if no water is found within scan range.
-     */
     private double findWaterSurfaceY() {
         int scanX = MathHelper.floor(state.position.x);
         int scanZ = MathHelper.floor(state.position.z);
-
-        // Scan from well above the hull down to 20 blocks below hull bottom.
         int startY = MathHelper.floor(state.position.y) + 4;
         int endY   = startY - 24;
-
         for (int y = startY; y >= endY; y--) {
             FluidState fluid = world.getFluidState(new BlockPos(scanX, y, scanZ));
-            if (!fluid.isEmpty()) {
-                return y + 1.0D;  // top surface of this water block
-            }
+            if (!fluid.isEmpty()) return y + 1.0D;
         }
-        return Double.NaN;  // no water found
+        return Double.NaN;
     }
 
-    /** World Y of the bottom of the hull bounding box. */
     private double hullBottomWorldY() {
         double offset = hullBounds != null ? hullBounds.minY() : -0.5D;
         return state.position.y + offset;
@@ -165,16 +177,9 @@ public class ShipPhysicsEngine {
 
     // ---- Floor penetration guard ----------------------------------------
 
-    /**
-     * If the hull bottom is inside a solid block, push the position up
-     * until it clears, and zero out downward velocity.
-     * Does NOT bounce — velocity is set to zero to avoid the 1-block
-     * teleport loop.
-     */
     private Vec3d preventFloorPenetration(Vec3d pos) {
         if (hullBounds == null) return pos;
         double minYOffset = hullBounds.minY();
-
         for (int attempt = 0; attempt < 16; attempt++) {
             BlockPos check = new BlockPos(
                 MathHelper.floor(pos.x),
@@ -183,11 +188,9 @@ public class ShipPhysicsEngine {
             );
             BlockState bs = world.getBlockState(check);
             if (!bs.isSolidBlock(world, check)) break;
-            // Nudge up by the remaining penetration depth.
-            double blockTop = check.getY() + 1.0D;
+            double blockTop   = check.getY() + 1.0D;
             double penetration = blockTop - (pos.y + minYOffset);
             pos = pos.add(0.0D, penetration + 0.001D, 0.0D);
-            // Zero vertical velocity — no bounce, no teleport loop.
             state.velocity = new Vec3d(state.velocity.x, 0.0D, state.velocity.z);
         }
         return pos;
