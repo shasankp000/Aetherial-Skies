@@ -38,17 +38,19 @@ public final class ShipCollisionProvider {
 
     /**
      * Computes the BlockPos a packed block occupies in world space,
-     * matching the renderer’s translation exactly.
+     * matching the renderer's translation exactly.
      *
      *  renderer does:  translate(offset - cameraPos)
      *                  rotate yaw
      *                  translate(lo.x - 0.5, lo.y, lo.z - 0.5)
      *
-     *  So the block’s bottom-NW corner in world space is:
+     *  So the block's bottom-NW corner in world space is:
      *    worldOffset + rotate(lo.x - 0.5, lo.y, lo.z - 0.5)
      *  and its BlockPos is floor of that.
+     *
+     *  Public so cross-package classes (e.g. mixins) can reuse this calculation.
      */
-    static BlockPos worldPosOf(ShipTransform t, ShipCrateService.PackedBlock pb) {
+    public static BlockPos worldPosOf(ShipTransform t, ShipCrateService.PackedBlock pb) {
         Vec3d lo  = pb.localOffset();
         double lx = lo.x - 0.5;
         double ly = lo.y;
