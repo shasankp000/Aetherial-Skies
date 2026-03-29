@@ -6,6 +6,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.shasankp000.AetherialSkies;
 import net.shasankp000.Physics.JoltPhysicsSystem;
 import net.shasankp000.Ship.ShipHullData;
 import net.shasankp000.Ship.Structure.ShipStructure;
@@ -16,15 +17,24 @@ import java.util.UUID;
 /**
  * Waterline-target physics engine.
  *
+ * Behaviour by environment:
+ *
+ *  ON WATER  — PD buoyancy + gravity drives the hull bottom to
+ *              (waterSurfaceY - TARGET_DRAFT).  The ship bobs and
+ *              settles at the waterline.
+ *
+ *  ON LAND   — No gravity, no velocity.  The ship sits stationary at
+ *              its deploy Y, with preventFloorPenetration() ensuring it
+ *              never clips into the ground.  This prevents the ship from
+ *              free-falling off screen when deployed away from water.
+ *
  * Each tick:
- *  1. PD buoyancy/gravity controller computes new position + velocity.
- *  2. The result is pushed into Jolt as a kinematic body move
- *     (updateBodyTransform). Jolt then owns the position for collision
- *     purposes.
- *  3. After JoltPhysicsSystem.stepSimulation() (called by ShipTransformManager)
- *     we read the authoritative position back from Jolt via getBodyPosition().
- *     For kinematic bodies Jolt doesn't override our set position, but this
- *     round-trip makes the code future-proof for switching to dynamic mode.
+ *  1. Determine environment (water / land) via findWaterSurfaceY().
+ *  2. If on water: PD controller + integrate + floor guard.
+ *     If on land:  zero velocity + floor guard only.
+ *  3. Push result into Jolt as a kinematic body move.
+ *  4. After JoltPhysicsSystem.stepSimulation() (called by ShipTransformManager)
+ *     read the authoritative position back from Jolt.
  */
 public class ShipPhysicsEngine {
 
@@ -39,7 +49,8 @@ public class ShipPhysicsEngine {
     private int    waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 3;
 
-    private boolean inWater = false;
+    private boolean inWater     = false;
+    private boolean wasInWater  = false; // for transition logging
 
     public ShipPhysicsEngine(UUID shipId, ShipPhysicsState state, World world) {
         this.shipId = shipId;
@@ -78,56 +89,56 @@ public class ShipPhysicsEngine {
 
     // ---- Tick ------------------------------------------------------------
 
-    /**
-     * Runs the PD physics controller, pushes the result into Jolt, then reads
-     * back the Jolt-authoritative position into state.position.
-     * ShipTransformManager must call JoltPhysicsSystem.stepSimulation() after
-     * all engine.tick() calls so the read-back reflects the stepped world.
-     */
     public void tick() {
         refreshWaterSurface();
 
         double hullBottomY = hullBottomWorldY();
         inWater = !Double.isNaN(cachedWaterSurfaceY) && hullBottomY <= cachedWaterSurfaceY;
 
-        // ---- Vertical dynamics ------------------------------------------
-        double ay = -PhysicsConfig.GRAVITY;
+        // Log water / land transitions.
+        if (inWater != wasInWater) {
+            AetherialSkies.LOGGER.info(
+                "[ShipPhysicsEngine] Ship {} {} water at y={}",
+                shipId.toString().substring(0, 8),
+                inWater ? "entered" : "left",
+                String.format("%.2f", state.position.y));
+            wasInWater = inWater;
+        }
 
         if (inWater) {
+            // ---- Water mode: PD buoyancy + gravity -----------------------
+            double ay = -PhysicsConfig.GRAVITY;
+
             double targetY   = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
             double error     = targetY - hullBottomY;
             double a_buoy    = PhysicsConfig.BUOY_P * error
                              - PhysicsConfig.BUOY_D * state.velocity.y;
             ay += a_buoy;
+
+            double newVy = state.velocity.y + ay;
+            double drag  = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG;
+            newVy        = newVy            * (1.0 - drag);
+            double newVx = state.velocity.x * (1.0 - drag);
+            double newVz = state.velocity.z * (1.0 - drag);
+
+            state.velocity = clipVelocity(new Vec3d(newVx, newVy, newVz));
+            state.position = state.position.add(state.velocity);
+
+            if (isAtRest()) {
+                state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
+            }
+        } else {
+            // ---- Land mode: static — no gravity, no drift ---------------
+            // Zero velocity so the ship doesn't slide or fall.
+            state.velocity = Vec3d.ZERO;
+            // preventFloorPenetration still runs below to push the hull up
+            // if it spawned partially inside a block.
         }
 
-        // ---- Integrate Y -------------------------------------------------
-        double newVy = state.velocity.y + ay;
-
-        // ---- Drag --------------------------------------------------------
-        double drag = PhysicsConfig.AIR_DRAG + (inWater ? PhysicsConfig.WATER_DRAG : 0.0);
-        newVy        = newVy            * (1.0 - drag);
-        double newVx = state.velocity.x * (1.0 - drag);
-        double newVz = state.velocity.z * (1.0 - drag);
-
-        state.velocity = new Vec3d(newVx, newVy, newVz);
-        state.velocity = clipVelocity(state.velocity);
-
-        // ---- Integrate position ------------------------------------------
-        state.position = state.position.add(state.velocity);
-
-        // ---- Hard floor guard -------------------------------------------
+        // Floor penetration guard runs in both modes.
         state.position = preventFloorPenetration(state.position);
 
-        // ---- Settle ------------------------------------------------------
-        if (isAtRest()) {
-            state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
-        }
-
-        // ---- Push into Jolt (kinematic move) ----------------------------
-        // Jolt body tracks our computed position so collision broadphase is
-        // always up to date. stepSimulation() is called by ShipTransformManager
-        // after all ships have been updated.
+        // Push into Jolt (kinematic move).
         if (hullData != null) {
             JoltPhysicsSystem.getInstance().updateBodyTransform(
                 shipId, state.position, state.yaw, hullData);
@@ -136,9 +147,7 @@ public class ShipPhysicsEngine {
 
     /**
      * Called by ShipTransformManager AFTER stepSimulation() to read back the
-     * Jolt-authoritative position. For kinematic bodies this is identical to
-     * what we pushed in tick(), but having this call makes it trivial to
-     * switch to dynamic mode later.
+     * Jolt-authoritative position.
      */
     public void readBackFromJolt() {
         if (hullData == null) return;
