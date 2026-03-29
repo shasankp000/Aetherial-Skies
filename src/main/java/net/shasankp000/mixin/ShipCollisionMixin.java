@@ -13,15 +13,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import net.shasankp000.Ship.Client.ShipCollisionProvider;
 
 /**
- * CLIENT-ONLY mixin on ChunkCache.
+ * Temporarily retained as a no-op stub.
+ * Will be replaced entirely by the Jolt-JNI terrain block placement
+ * approach in Step 5 (ShipPhysicsBlockBridge).
  *
- * Intercepts the block-voxel-shape collision engine
- * (Entity#move / VoxelShapes#calculateMaxOffset) which queries
- * ChunkCache.getBlockState() for solid shapes.
- *
- * Guard: only override air or fluid blocks. In Yarn 1.20.1 there are no
- * separate FLOWING_WATER / FLOWING_LAVA entries — Blocks.WATER and
- * Blocks.LAVA cover both source and flowing variants via FluidState.
+ * The previous implementation caused phantom solid blocks due to
+ * World#getBlockState being too broad a mixin target.
+ * For now collision is handled by ShipDeckSnapHelper (snap/eject)
+ * until the Jolt bridge is complete.
  */
 @Environment(EnvType.CLIENT)
 @Mixin(ChunkCache.class)
@@ -36,18 +35,6 @@ public abstract class ShipCollisionMixin {
             BlockPos pos,
             CallbackInfoReturnable<BlockState> cir
     ) {
-        BlockState state = cir.getReturnValue();
-        if (state == null) return;
-        if (!isAirOrFluid(state)) return;
-
-        if (ShipCollisionProvider.isShipBlock(pos)) {
-            cir.setReturnValue(Blocks.STONE.getDefaultState());
-        }
-    }
-
-    private static boolean isAirOrFluid(BlockState state) {
-        return state.isAir()
-            || state.isOf(Blocks.WATER)
-            || state.isOf(Blocks.LAVA);
+        // No-op until Jolt Step 5 (ShipPhysicsBlockBridge) is complete.
     }
 }

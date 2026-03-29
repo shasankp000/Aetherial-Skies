@@ -12,7 +12,6 @@
 		"ClientPlayerInteractionManagerMixin",
 		"MinecraftClientMixin",
 		"ShipCollisionMixin",
-		"ShipWorldCollisionMixin",
 		"MixinClientPlayerEntity"
 	],
 	"injectors": {
