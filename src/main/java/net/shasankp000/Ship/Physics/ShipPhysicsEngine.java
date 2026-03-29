@@ -6,13 +6,16 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
-import net.shasankp000.Entity.ShipBoatEntity;
 import net.shasankp000.Ship.ShipHullData;
+import net.shasankp000.Ship.Structure.ShipStructure;
+import net.shasankp000.Ship.Transform.ShipTransform;
 
 /**
  * Core physics engine for ship simulation.
- * Handles gravity, drag, buoyancy, and collision with terrain.
- * Water blocks are intentionally ignored in terrain collision —
+ *
+ * Works entirely against ShipStructure + ShipTransform — no entity references.
+ * Handles gravity, drag, buoyancy, and solid-terrain collision.
+ * Water blocks are intentionally excluded from terrain collision:
  * buoyancy handles vertical position when the hull is in water.
  */
 public class ShipPhysicsEngine {
@@ -27,10 +30,12 @@ public class ShipPhysicsEngine {
     private int waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 5;
 
-    public ShipPhysicsEngine(ShipPhysicsState state, World world, float estimatedVolume) {
+    public ShipPhysicsEngine(ShipPhysicsState state, World world) {
         this.state = state;
         this.world = world;
     }
+
+    // ---- Hull data -------------------------------------------------------
 
     public void setHullBounds(ShipHullData.HullBounds bounds) {
         this.hullBounds = bounds;
@@ -44,16 +49,31 @@ public class ShipPhysicsEngine {
         this.waterSurfaceCacheTicks = 0;
     }
 
-    public void syncFrom(ShipBoatEntity ship) {
-        state.position = ship.getPos();
-        state.velocity = ship.getVelocity();
-        state.yaw = ship.getYaw();
+    // ---- Sync to/from ShipStructure --------------------------------------
+
+    /**
+     * Reads world-offset and yaw from the structure's current transform into
+     * the physics state so the engine works from the latest known position.
+     */
+    public void syncFrom(ShipStructure structure) {
+        ShipTransform t = structure.getTransform();
+        state.position = t.worldOffset();
+        state.velocity = t.velocity();
+        state.yaw = t.yaw();
     }
 
-    public void applyTo(ShipBoatEntity ship) {
-        ship.setPosition(state.position.x, state.position.y, state.position.z);
-        ship.setVelocity(state.velocity);
+    /**
+     * Writes the physics result back to the structure by creating a new
+     * immutable ShipTransform with updated motion fields.
+     */
+    public void applyTo(ShipStructure structure) {
+        ShipTransform current = structure.getTransform();
+        structure.setTransform(
+            current.withMotion(state.position, state.yaw, state.velocity)
+        );
     }
+
+    // ---- Tick ------------------------------------------------------------
 
     public void tick() {
         float s = calculateBuoyancy();
@@ -92,14 +112,10 @@ public class ShipPhysicsEngine {
         }
     }
 
-    /**
-     * Returns submersion ratio (0.0 = fully in air, 1.0 = fully submerged)
-     * using a hull height scan.
-     */
+    // ---- Internal helpers ------------------------------------------------
+
     private float calculateBuoyancy() {
-        if (hullBounds == null || hullData == null) {
-            return 0.0f;
-        }
+        if (hullBounds == null || hullData == null) return 0.0f;
 
         if (waterSurfaceCacheTicks <= 0 || Double.isNaN(cachedWaterSurfaceY)) {
             cachedWaterSurfaceY = findWaterSurfaceY();
@@ -110,17 +126,13 @@ public class ShipPhysicsEngine {
 
         double hullBottomWorldY = state.position.y + hullBounds.minY();
         double hullHeight = hullBounds.height();
-        if (hullHeight <= 0.0D) {
-            return 0.0f;
-        }
+        if (hullHeight <= 0.0D) return 0.0f;
 
-        double submergedDepth = MathHelper.clamp(cachedWaterSurfaceY - hullBottomWorldY, 0.0D, hullHeight);
+        double submergedDepth = MathHelper.clamp(
+            cachedWaterSurfaceY - hullBottomWorldY, 0.0D, hullHeight);
         return (float) (submergedDepth / hullHeight);
     }
 
-    /**
-     * Scans upward from below hull bottom to find water surface Y at ship center XZ.
-     */
     private double findWaterSurfaceY() {
         double hullBottomWorldY = state.position.y + (hullBounds != null ? hullBounds.minY() : -0.5D);
         int scanX = MathHelper.floor(state.position.x);
@@ -140,7 +152,6 @@ public class ShipPhysicsEngine {
                 break;
             }
         }
-
         return lastWaterY;
     }
 
@@ -152,42 +163,24 @@ public class ShipPhysicsEngine {
         return velocity;
     }
 
-    /**
-     * Handles terrain (solid block) collision only.
-     * Water blocks are explicitly excluded — treating water as a solid obstacle
-     * would push the ship upward on every tick, fighting buoyancy and causing
-     * the ship to hover above the water surface.
-     */
     private Vec3d handleTerrainCollision(Vec3d newPos) {
-        if (hullBounds == null) {
-            return newPos;
-        }
+        if (hullBounds == null) return newPos;
 
         double minYOffset = hullBounds.minY();
         double widthRadius = Math.max(hullBounds.widthX(), hullBounds.widthZ()) * 0.5D;
         double height = hullBounds.height();
 
-        // Check only the bottom-centre block of the hull for solid collision.
-        // This avoids false positives from water and keeps the check cheap.
         int checkX = MathHelper.floor(newPos.x);
         int checkY = MathHelper.floor(newPos.y + minYOffset);
         int checkZ = MathHelper.floor(newPos.z);
         BlockPos bottomPos = new BlockPos(checkX, checkY, checkZ);
         BlockState bottomBlock = world.getBlockState(bottomPos);
 
-        // Only react to solid blocks — skip air, water, lava, and other fluids.
-        if (!bottomBlock.isSolidBlock(world, bottomPos)) {
-            return newPos;
-        }
+        if (!bottomBlock.isSolidBlock(world, bottomPos)) return newPos;
 
-        // Solid block detected at hull bottom — push ship up clear of it.
         Box shipBounds = new Box(
-                newPos.x - widthRadius,
-                newPos.y + minYOffset,
-                newPos.z - widthRadius,
-                newPos.x + widthRadius,
-                newPos.y + minYOffset + height,
-                newPos.z + widthRadius
+                newPos.x - widthRadius, newPos.y + minYOffset, newPos.z - widthRadius,
+                newPos.x + widthRadius, newPos.y + minYOffset + height, newPos.z + widthRadius
         );
 
         for (int i = 0; i < 10; i++) {
@@ -199,31 +192,23 @@ public class ShipPhysicsEngine {
                 MathHelper.floor(newPos.z)
             );
             if (!world.getBlockState(newBottomPos).isSolidBlock(world, newBottomPos)) {
-                state.velocity = new Vec3d(state.velocity.x, Math.max(0.0D, state.velocity.y), state.velocity.z);
+                state.velocity = new Vec3d(
+                    state.velocity.x, Math.max(0.0D, state.velocity.y), state.velocity.z);
                 break;
             }
         }
-
         return newPos;
     }
 
     private boolean isAtRest() {
-        return state.velocity.lengthSquared() < (PhysicsConfig.SETTLE_THRESHOLD * PhysicsConfig.SETTLE_THRESHOLD);
+        return state.velocity.lengthSquared() <
+            (PhysicsConfig.SETTLE_THRESHOLD * PhysicsConfig.SETTLE_THRESHOLD);
     }
 
-    public ShipPhysicsState getState() {
-        return state;
-    }
+    // ---- Accessors -------------------------------------------------------
 
-    public Vec3d getPosition() {
-        return state.position;
-    }
-
-    public Vec3d getVelocity() {
-        return state.velocity;
-    }
-
-    public float getYaw() {
-        return state.yaw;
-    }
+    public ShipPhysicsState getState() { return state; }
+    public Vec3d getPosition()         { return state.position; }
+    public Vec3d getVelocity()         { return state.velocity; }
+    public float getYaw()              { return state.yaw; }
 }
