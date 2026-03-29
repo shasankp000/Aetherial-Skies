@@ -3,15 +3,13 @@
 	"package": "net.shasankp000.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
-		"BlockMixin",
+      "BlockMixin",
 		"WorldMixin",
-		"PlayerEntityMixin",
-		"MixinLivingEntity"
+		"PlayerEntityMixin"
 	],
 	"client": [
 		"ClientPlayerInteractionManagerMixin",
-		"MinecraftClientMixin",
-		"MixinClientPlayerEntity"
+		"MinecraftClientMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
