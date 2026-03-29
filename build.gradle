@@ -38,11 +38,55 @@ dependencies {
 	joltLibs files('libs/jolt-jni-MacOSX_ARM64-3.9.0.jar')
 }
 
+// ---------------------------------------------------------------------------
+// Extract Jolt native libraries from the platform JARs into a staging
+// directory so that System.loadLibrary can find them when running in the
+// Gradle dev environment (runClient / runServer).
+// ---------------------------------------------------------------------------
+def joltNativesDir = file("${buildDir}/jolt-natives")
+
+task extractJoltNatives {
+	group = 'build'
+	description = 'Extracts Jolt JNI native libraries from the platform jars for dev runs.'
+	inputs.files configurations.joltLibs
+	outputs.dir joltNativesDir
+
+	doLast {
+		joltNativesDir.mkdirs()
+		configurations.joltLibs.each { jar ->
+			zipTree(jar).visit { details ->
+				def name = details.name
+				if (name.endsWith('.dll') || name.endsWith('.so') || name.endsWith('.dylib')) {
+					def dest = new File(joltNativesDir, name)
+					if (!dest.exists()) {
+						details.copyTo(dest)
+						logger.lifecycle("Extracted Jolt native: ${name} -> ${dest}")
+					}
+				}
+			}
+		}
+	}
+}
+
+// Make runClient and runServer depend on extraction and pick up the natives dir.
+afterEvaluate {
+	tasks.named('runClient') {
+		dependsOn extractJoltNatives
+		jvmArgs "-Djava.library.path=${joltNativesDir.absolutePath}"
+	}
+	tasks.named('runServer') {
+		dependsOn extractJoltNatives
+		jvmArgs "-Djava.library.path=${joltNativesDir.absolutePath}"
+	}
+}
+
 jar {
 	inputs.property "archivesName", project.base.archivesName
 	from("LICENSE") {
 		rename { "${it}_${inputs.properties.archivesName}" }
 	}
+	// Bundle all native libs flat at the jar root so the classpath-resource
+	// probe in JoltNativeLoader ("/joltjni.dll" etc.) finds them in production.
 	from {
 		configurations.joltLibs.collect { it.isDirectory() ? it : zipTree(it) }
 	} {
@@ -51,6 +95,13 @@ jar {
 		exclude 'META-INF/*.DSA'
 		exclude 'META-INF/*.RSA'
 		duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+		// Flatten all .dll/.so/.dylib to the jar root for the classpath probe.
+		eachFile { details ->
+			def fn = details.name
+			if (fn.endsWith('.dll') || fn.endsWith('.so') || fn.endsWith('.dylib')) {
+				details.path = fn   // strip subdirectory path -> jar root
+			}
+		}
 	}
 }
 
