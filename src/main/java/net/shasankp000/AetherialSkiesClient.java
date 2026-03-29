@@ -12,6 +12,8 @@ import net.shasankp000.Ship.Network.ShipDeployS2CPacket;
 import net.shasankp000.Ship.Network.ShipRemoveS2CPacket;
 import net.shasankp000.Ship.Network.ShipTransformSyncS2CPacket;
 
+import java.util.UUID;
+
 public class AetherialSkiesClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
@@ -52,7 +54,7 @@ public class AetherialSkiesClient implements ClientModInitializer {
             }
         );
 
-        // Clear cache when the player disconnects or changes world.
+        // Clear cache on disconnect / world change.
         ClientPlayConnectionEvents.DISCONNECT.register(
             (handler, client) -> ShipTransformCache.INSTANCE.clear()
         );
