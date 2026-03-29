@@ -39,19 +39,21 @@ dependencies {
 }
 
 // ---------------------------------------------------------------------------
-// Build a semicolon-separated list of absolute paths of the joltLibs jars
-// and inject it as -Djolt.libs.path into every Loom run config.
-// JoltNativeLoader reads this property to find and extract the native at
-// runtime during 'runClient' / 'runServer' without needing java.library.path.
+// Build the jolt.libs.path value from the statically-known libs/ paths.
+// We deliberately do NOT call configurations.joltLibs.resolvedConfiguration
+// here because that would force dependency resolution during the configuration
+// phase and corrupt Loom's internal repository state.
 // ---------------------------------------------------------------------------
-def joltLibsPathValue = configurations.joltLibs
-	.resolvedConfiguration
-	.resolvedArtifacts
-	.collect { it.file.absolutePath }
+def joltJarNames = [
+	'jolt-jni-Windows64-3.9.0.jar',
+	'jolt-jni-Linux64-3.9.0.jar',
+	'jolt-jni-MacOSX64-3.9.0.jar',
+	'jolt-jni-MacOSX_ARM64-3.9.0.jar',
+]
+def joltLibsPathValue = joltJarNames
+	.collect { new File(projectDir, "libs/${it}").absolutePath }
 	.join(';')
 
-// Loom exposes run configurations via loom.runs.*  Each RunConfigSettings
-// has a vmArgs list we can append to.
 loom {
 	runs {
 		client {
