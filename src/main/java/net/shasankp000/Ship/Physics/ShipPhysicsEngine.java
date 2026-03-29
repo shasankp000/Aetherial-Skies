@@ -14,6 +14,16 @@ import net.shasankp000.Ship.Transform.ShipTransform;
 
 import java.util.UUID;
 
+/**
+ * Waterline-target physics engine.
+ *
+ * ON WATER: PD buoyancy + gravity drives hull bottom to
+ *           (waterSurfaceY - TARGET_DRAFT). Ship bobs and settles.
+ * ON LAND:  No gravity, no velocity. Ship sits static at deploy Y.
+ *           preventFloorPenetration nudges it above any solid block
+ *           it may have spawned inside, capped at 1 block/tick to
+ *           prevent violent ejection.
+ */
 public class ShipPhysicsEngine {
 
     private final ShipPhysicsState state;
@@ -29,10 +39,6 @@ public class ShipPhysicsEngine {
 
     private boolean inWater    = false;
     private boolean wasInWater = false;
-
-    /** Counts ticks since this engine was created; used for early debug logging. */
-    private int tickCount = 0;
-    private static final int DEBUG_TICKS = 10;
 
     public ShipPhysicsEngine(UUID shipId, ShipPhysicsState state, World world) {
         this.shipId = shipId;
@@ -80,43 +86,16 @@ public class ShipPhysicsEngine {
             wasInWater = inWater;
         }
 
-        // ---- First-N-ticks debug dump ------------------------------------
-        if (tickCount < DEBUG_TICKS) {
-            AetherialSkies.LOGGER.info(
-                "[PhysDebug t={}] ship={} pos.y={} waterY={} hullBottomY={} inWater={} vel.y={} minY={}",
-                tickCount,
-                shipId.toString().substring(0, 8),
-                String.format("%.4f", state.position.y),
-                Double.isNaN(cachedWaterSurfaceY) ? "NaN" : String.format("%.4f", cachedWaterSurfaceY),
-                String.format("%.4f", hullBottomY),
-                inWater,
-                String.format("%.4f", state.velocity.y),
-                hullBounds != null ? String.format("%.4f", hullBounds.minY()) : "null"
-            );
-            tickCount++;
-        }
-
         if (inWater) {
-            double ay = -PhysicsConfig.GRAVITY;
-            double targetY   = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
-            double error     = targetY - hullBottomY;
-
-            if (tickCount <= DEBUG_TICKS) {
-                AetherialSkies.LOGGER.info(
-                    "[PhysDebug t={}] targetY={} error={} a_buoy={}",
-                    tickCount - 1,
-                    String.format("%.4f", targetY),
-                    String.format("%.4f", error),
-                    String.format("%.6f", PhysicsConfig.BUOY_P * error - PhysicsConfig.BUOY_D * state.velocity.y)
-                );
-            }
-
-            double a_buoy = PhysicsConfig.BUOY_P * error - PhysicsConfig.BUOY_D * state.velocity.y;
+            double ay      = -PhysicsConfig.GRAVITY;
+            double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
+            double error   = targetY - hullBottomY;
+            double a_buoy  = PhysicsConfig.BUOY_P * error
+                           - PhysicsConfig.BUOY_D * state.velocity.y;
             ay += a_buoy;
 
-            double newVy = state.velocity.y + ay;
             double drag  = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG;
-            newVy        = newVy            * (1.0 - drag);
+            double newVy = (state.velocity.y + ay) * (1.0 - drag);
             double newVx = state.velocity.x * (1.0 - drag);
             double newVz = state.velocity.z * (1.0 - drag);
 
@@ -127,9 +106,11 @@ public class ShipPhysicsEngine {
                 state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
             }
         } else {
+            // Land mode: static, no gravity, no drift.
             state.velocity = Vec3d.ZERO;
         }
 
+        // Floor penetration guard — capped to 1 block total push per tick.
         state.position = preventFloorPenetration(state.position);
 
         if (hullData != null) {
@@ -145,6 +126,8 @@ public class ShipPhysicsEngine {
         state.position = joltPos;
     }
 
+    // ---- Water surface ---------------------------------------------------
+
     private void refreshWaterSurface() {
         if (waterSurfaceCacheTicks <= 0 || Double.isNaN(cachedWaterSurfaceY)) {
             cachedWaterSurfaceY = findWaterSurfaceY();
@@ -155,8 +138,8 @@ public class ShipPhysicsEngine {
     }
 
     private double findWaterSurfaceY() {
-        int scanX = MathHelper.floor(state.position.x);
-        int scanZ = MathHelper.floor(state.position.z);
+        int scanX  = MathHelper.floor(state.position.x);
+        int scanZ  = MathHelper.floor(state.position.z);
         int startY = MathHelper.floor(state.position.y) + 4;
         int endY   = startY - 24;
         for (int y = startY; y >= endY; y--) {
@@ -171,9 +154,17 @@ public class ShipPhysicsEngine {
         return state.position.y + offset;
     }
 
+    // ---- Floor penetration guard ----------------------------------------
+    // Capped at MAX_PUSH_PER_TICK total upward displacement to prevent
+    // violent multi-block ejection when spawning inside solid terrain.
+
+    private static final double MAX_PUSH_PER_TICK = 1.0D;
+
     private Vec3d preventFloorPenetration(Vec3d pos) {
         if (hullBounds == null) return pos;
-        double minYOffset = hullBounds.minY();
+        double minYOffset  = hullBounds.minY();
+        double totalPushed = 0.0D;
+
         for (int attempt = 0; attempt < 16; attempt++) {
             BlockPos check = new BlockPos(
                 MathHelper.floor(pos.x),
@@ -182,13 +173,23 @@ public class ShipPhysicsEngine {
             );
             BlockState bs = world.getBlockState(check);
             if (!bs.isSolidBlock(world, check)) break;
+
             double blockTop    = check.getY() + 1.0D;
             double penetration = blockTop - (pos.y + minYOffset);
-            pos = pos.add(0.0D, penetration + 0.001D, 0.0D);
+            double push        = Math.min(penetration + 0.001D,
+                                         MAX_PUSH_PER_TICK - totalPushed);
+            if (push <= 0.0D) break;
+
+            pos         = pos.add(0.0D, push, 0.0D);
+            totalPushed += push;
             state.velocity = new Vec3d(state.velocity.x, 0.0D, state.velocity.z);
+
+            if (totalPushed >= MAX_PUSH_PER_TICK) break;
         }
         return pos;
     }
+
+    // ---- Helpers ---------------------------------------------------------
 
     private Vec3d clipVelocity(Vec3d v) {
         double speed = v.length();
