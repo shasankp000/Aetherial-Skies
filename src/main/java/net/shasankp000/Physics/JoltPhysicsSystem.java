@@ -140,7 +140,8 @@ public final class JoltPhysicsSystem {
                     shipId, shapeResult.getError());
             return;
         }
-        Shape shape = shapeResult.get();
+        // ShapeResult.get() returns ShapeRefC in jolt-jni 3.9.0
+        ShapeRefC shape = shapeResult.get();
 
         // Centre of the box in world space = ship position + hull centre offset.
         float cx = (float) (initialPos.x + (bounds.minX() + bounds.maxX()) / 2.0);
@@ -166,10 +167,12 @@ public final class JoltPhysicsSystem {
             return;
         }
 
-        bodyInterface.addBody(body.getId(), EActivation.Activate);
-        shipBodyIds.put(shipId, body.getId().getIndexAndSequenceNumber());
+        // Body.getId() returns a primitive int in jolt-jni 3.9.0
+        int bodyId = body.getId();
+        bodyInterface.addBody(bodyId, EActivation.Activate);
+        shipBodyIds.put(shipId, bodyId);
         LOGGER.info("[JoltPhysicsSystem] Registered kinematic body for ship {} (bodyId={})",
-                shipId, body.getId().getIndexAndSequenceNumber());
+                shipId, bodyId);
     }
 
     /**
@@ -191,9 +194,9 @@ public final class JoltPhysicsSystem {
         float qw = (float) Math.cos(halfYaw);
         float qy = (float) Math.sin(halfYaw);
 
-        BodyId bodyId = new BodyId(rawId);
+        // BodyInterface.setPositionAndRotation takes a plain int bodyId
         bodyInterface.setPositionAndRotation(
-            bodyId,
+            rawId,
             new RVec3(cx, cy, cz),
             new Quat(0f, qy, 0f, qw),
             EActivation.Activate
@@ -211,8 +214,8 @@ public final class JoltPhysicsSystem {
         if (rawId == null) return fallback;
 
         ShipHullData.HullBounds bounds = hullData.computeBounds();
-        BodyId bodyId = new BodyId(rawId);
-        RVec3 centre = bodyInterface.getPosition(bodyId);
+        // BodyInterface.getPosition takes a plain int bodyId
+        RVec3 centre = bodyInterface.getPosition(rawId);
 
         // Reverse the centre-offset to get the ship pivot position.
         double px = centre.xx() - (bounds.minX() + bounds.maxX()) / 2.0;
@@ -229,9 +232,9 @@ public final class JoltPhysicsSystem {
         Integer rawId = shipBodyIds.remove(shipId);
         if (rawId == null) return;
 
-        BodyId bodyId = new BodyId(rawId);
-        bodyInterface.removeBody(bodyId);
-        bodyInterface.destroyBody(bodyId);
+        // BodyInterface.removeBody / destroyBody take a plain int bodyId
+        bodyInterface.removeBody(rawId);
+        bodyInterface.destroyBody(rawId);
         LOGGER.info("[JoltPhysicsSystem] Removed body for ship {}", shipId);
     }
 
@@ -258,9 +261,8 @@ public final class JoltPhysicsSystem {
 
         // Remove all ship bodies before tearing down the system.
         for (Integer rawId : shipBodyIds.values()) {
-            BodyId bodyId = new BodyId(rawId);
-            bodyInterface.removeBody(bodyId);
-            bodyInterface.destroyBody(bodyId);
+            bodyInterface.removeBody(rawId);
+            bodyInterface.destroyBody(rawId);
         }
         shipBodyIds.clear();
 
