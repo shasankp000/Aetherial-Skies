@@ -14,6 +14,14 @@ repositories {
 	mavenCentral()
 }
 
+configurations {
+	// A plain (non-mod) configuration that bypasses Fabric Loom remapping.
+	// Use this for pure-Java libraries that are NOT Fabric mods.
+	joltLibs
+	compileClasspath.extendsFrom joltLibs
+	runtimeClasspath.extendsFrom joltLibs
+}
+
 fabricApi {
 	configureDataGeneration {
 		client = true
@@ -29,19 +37,33 @@ dependencies {
 	// Fabric API
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-	// Jolt-JNI: pure-Java API (compile + runtime)
-	implementation "com.github.stephengold:jolt-jni:${project.jolt_jni_version}"
+	// Jolt-JNI: resolved outside Loom remapping pipeline
+	joltLibs "com.github.stephengold:jolt-jni:${project.jolt_jni_version}"
+	joltLibs "com.github.stephengold:jolt-jni-Windows64:${project.jolt_jni_version}"
+	joltLibs "com.github.stephengold:jolt-jni-Linux64:${project.jolt_jni_version}"
+	joltLibs "com.github.stephengold:jolt-jni-MacOSX64:${project.jolt_jni_version}"
+	joltLibs "com.github.stephengold:jolt-jni-MacOSX_ARM64:${project.jolt_jni_version}"
+}
 
-	// Jolt-JNI: platform native libraries (runtime only, bundled in jar)
-	runtimeOnly "com.github.stephengold:jolt-jni-Windows64:${project.jolt_jni_version}"
-	runtimeOnly "com.github.stephengold:jolt-jni-Linux64:${project.jolt_jni_version}"
-	runtimeOnly "com.github.stephengold:jolt-jni-MacOSX64:${project.jolt_jni_version}"
-	runtimeOnly "com.github.stephengold:jolt-jni-MacOSX_ARM64:${project.jolt_jni_version}"
+// Bundle jolt jars into the final mod jar
+jar {
+	inputs.property "archivesName", project.base.archivesName
+	from("LICENSE") {
+		rename { "${it}_${inputs.properties.archivesName}" }
+	}
+	// Include all jolt-jni jars (API + all platform natives) inside the mod jar
+	from {
+		configurations.joltLibs.collect { it.isDirectory() ? it : zipTree(it) }
+	} {
+		exclude 'META-INF/MANIFEST.MF'
+		exclude 'META-INF/*.SF'
+		exclude 'META-INF/*.DSA'
+		exclude 'META-INF/*.RSA'
+	}
 }
 
 processResources {
 	inputs.property "version", project.version
-
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
 	}
@@ -58,13 +80,6 @@ java {
 	withSourcesJar()
 	sourceCompatibility = JavaVersion.VERSION_17
 	targetCompatibility = JavaVersion.VERSION_17
-}
-
-jar {
-	inputs.property "archivesName", project.base.archivesName
-	from("LICENSE") {
-		rename { "${it}_${inputs.properties.archivesName}"}
-	}
 }
 
 publishing {
