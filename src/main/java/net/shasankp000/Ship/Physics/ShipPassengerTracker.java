@@ -10,39 +10,35 @@ import net.shasankp000.Ship.Transform.ShipTransform;
 /**
  * Moves players that are standing on a ship along with it each tick.
  *
- * Fix summary vs previous version:
- *  - deckTopY now computed as the top of the LOWEST block layer that makes
- *    up the main deck (most-common localOffset.y + 1), not hull maxY which
- *    was pointing at the helm top.
- *  - Movement uses player.addVelocity() instead of requestTeleport() so
- *    the player’s own input is not zeroed every tick.
- *  - Y correction only fires when the player has actually sunk below the
- *    deck surface (falling through), using a small threshold to avoid
- *    fighting vanilla step-up logic.
+ * Responsibilities:
+ *  - Detect if a player's XZ feet position is within the ship's deck footprint.
+ *  - If yes, add the ship's XZ velocity to the player so they ride with it.
+ *
+ * What this does NOT do:
+ *  - No requestTeleport / Y snapping. The client-side ShipCollisionMixin
+ *    (ChunkCache mixin) already makes ship blocks solid, so vanilla collision
+ *    keeps the player on the deck surface naturally. Calling requestTeleport
+ *    every tick resets the client's velocity to zero and causes the slowness.
  */
 public final class ShipPassengerTracker {
 
     private ShipPassengerTracker() {}
 
-    /** Vertical window above the deck in which a player is “on deck”. */
-    private static final double ABOVE_TOLERANCE = 4.0D;
-    /** How far below deck we still consider the player “on deck” (step-down). */
-    private static final double BELOW_TOLERANCE = 0.5D;
-    /** XZ margin added around hull footprint. */
+    private static final double ABOVE_TOLERANCE  = 4.0D;
+    private static final double BELOW_TOLERANCE  = 1.5D;
     private static final double FOOTPRINT_MARGIN = 0.3D;
 
     public static void tick(ShipStructure structure, Iterable<ServerPlayerEntity> players) {
-        ShipTransform      t      = structure.getTransform();
-        ShipHullData       hull   = structure.getHullData();
+        ShipTransform  t      = structure.getTransform();
+        ShipHullData   hull   = structure.getHullData();
         ShipHullData.HullBounds bounds = hull.computeBounds();
 
         double deckTopY = computeDeckTopY(hull, t);
 
-        // Axis-aligned footprint in world XZ.
-        double cx     = t.worldOffset().x;
-        double cz     = t.worldOffset().z;
-        double halfX  = bounds.widthX() * 0.5D + FOOTPRINT_MARGIN;
-        double halfZ  = bounds.widthZ() * 0.5D + FOOTPRINT_MARGIN;
+        double cx    = t.worldOffset().x;
+        double cz    = t.worldOffset().z;
+        double halfX = bounds.widthX() * 0.5D + FOOTPRINT_MARGIN;
+        double halfZ = bounds.widthZ() * 0.5D + FOOTPRINT_MARGIN;
 
         double footMinX = cx - halfX;
         double footMaxX = cx + halfX;
@@ -52,13 +48,13 @@ public final class ShipPassengerTracker {
         double footMaxY = deckTopY + ABOVE_TOLERANCE;
 
         Vec3d shipVel = t.velocity();
+        boolean shipMoving = shipVel.horizontalLengthSquared() > 1e-10;
 
         for (ServerPlayerEntity player : players) {
             if (!isEligible(player)) continue;
 
             Vec3d feet = player.getPos();
 
-            // Check XZ footprint.
             if (feet.x < footMinX || feet.x > footMaxX
              || feet.z < footMinZ || feet.z > footMaxZ
              || feet.y < footMinY || feet.y > footMaxY) {
@@ -68,41 +64,27 @@ public final class ShipPassengerTracker {
 
             structure.addBoardedPlayer(player.getUuid());
 
-            // --- Carry player with ship XZ movement -----------------------
-            // addVelocity accumulates into the player’s own velocity buffer
-            // so it blends with their input rather than overriding it.
-            if (Math.abs(shipVel.x) > 1e-6 || Math.abs(shipVel.z) > 1e-6) {
+            // Carry player with ship's horizontal motion only.
+            // addVelocity blends with the player's own input velocity
+            // and does NOT reset the client's movement state.
+            if (shipMoving) {
                 player.addVelocity(shipVel.x, 0.0, shipVel.z);
                 player.velocityModified = true;
-            }
-
-            // --- Y correction: only if player has sunk below deck ---------
-            // The client-side collision mixin handles the normal case.
-            // This is a fallback in case they slip through.
-            if (feet.y < deckTopY - 0.05D) {
-                player.requestTeleport(feet.x, deckTopY, feet.z);
             }
         }
     }
 
     /**
-     * Finds the world-space Y of the top surface of the main deck layer.
-     *
-     * Strategy: collect all unique localOffset.y values from the hull blocks,
-     * find the one with the highest count (the deck layer), add 1.0 (block top),
-     * then apply the ship’s worldOffset.y.
-     *
-     * This correctly ignores tall structures like the helm log that sit on top.
+     * Returns the world-space Y of the top surface of the main deck layer.
+     * Finds the most-populated integer localOffset.y across all blocks
+     * (ignoring tall structures like the helm) and adds 1.0 for block top.
      */
     private static double computeDeckTopY(ShipHullData hull, ShipTransform t) {
-        // Count occurrences of each integer Y layer.
         java.util.HashMap<Integer, Integer> layerCount = new java.util.HashMap<>();
         for (ShipCrateService.PackedBlock pb : hull.blocks()) {
             int iy = (int) Math.round(pb.localOffset().y);
             layerCount.merge(iy, 1, Integer::sum);
         }
-
-        // Pick the most-populated layer (the main deck).
         int deckLocalY = 0;
         int best = -1;
         for (java.util.Map.Entry<Integer, Integer> e : layerCount.entrySet()) {
@@ -111,8 +93,6 @@ public final class ShipPassengerTracker {
                 deckLocalY = e.getKey();
             }
         }
-
-        // top surface = localY + 1.0, then offset by world position.
         return t.worldOffset().y + deckLocalY + 1.0D;
     }
 
