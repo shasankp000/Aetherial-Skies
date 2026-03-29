@@ -13,17 +13,19 @@ import net.shasankp000.Ship.Transform.ShipTransform;
 /**
  * Core physics engine for ship simulation.
  *
- * Tick order (critical for stability):
- *  1. Calculate submersion ratio s ∈ [0,1].
- *  2. Calculate net vertical acceleration:
- *       a_y = gravity_accel + buoyancy_accel
- *       where buoyancy_accel = -displacementError * STIFFNESS  (spring)
- *  3. Apply drag AFTER acceleration so it damps the result of this tick,
- *     not the velocity from last tick.  This is what prevents runaway.
- *  4. Clamp, integrate, collide.
+ * Buoyancy model — proportional lift:
+ *   buoyancy_accel = GRAVITY × clamp(s / targetSubmersion, 0, MAX_RATIO)
  *
- * The water-drag coefficient is tuned to over-damp the buoyancy spring
- * (see PhysicsConfig for derivation).
+ * At the equilibrium waterline (s == targetSubmersion) buoyancy exactly
+ * cancels gravity.  WATER_DRAG damps the approach so the ship settles
+ * smoothly without oscillating.
+ *
+ * Tick order:
+ *  1. Compute submersion ratio s.
+ *  2. Compute net Y acceleration (gravity + buoyancy).
+ *  3. Integrate into velocity.
+ *  4. Apply multiplicative drag AFTER integration (damps this tick's impulse).
+ *  5. Clamp, integrate position, collide.
  */
 public class ShipPhysicsEngine {
 
@@ -33,7 +35,7 @@ public class ShipPhysicsEngine {
     private ShipHullData.HullBounds hullBounds = null;
     private ShipHullData hullData   = null;
 
-    private double cachedWaterSurfaceY = Double.NaN;
+    private double cachedWaterSurfaceY    = Double.NaN;
     private int    waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 5;
 
@@ -74,35 +76,37 @@ public class ShipPhysicsEngine {
     // ---- Tick ------------------------------------------------------------
 
     public void tick() {
-        float s = calculateBuoyancy();   // 0 = fully in air, 1 = fully submerged
+        float  s              = calculateBuoyancy();   // 0 = in air, 1 = fully submerged
+        double targetSub      = (hullData != null)
+            ? Math.max(0.01, hullData.effectiveRelativeDensity())
+            : 0.5;
 
-        // ---- Vertical dynamics ------------------------------------------
-        // Gravity always pulls down.
+        // ---- Net vertical acceleration -----------------------------------
+        // Gravity always acts downward.
         double ay = -PhysicsConfig.GRAVITY;
 
-        // Buoyancy spring: pushes up when too submerged, down when too high.
-        // Only active when hull is touching water (s > 0).
+        // Proportional buoyancy: lifts exactly as hard as gravity when the
+        // hull is at the target waterline, less when higher, more when lower
+        // (capped so it can’t fling the ship violently out of the water).
         if (s > 0.0f) {
-            float targetSubmersion = (hullData != null)
-                ? Math.max(0.01f, hullData.effectiveRelativeDensity())
-                : 0.5f;
-            double displacementError = s - targetSubmersion;
-            // Spring force (positive = up).
-            ay += -displacementError * PhysicsConfig.BUOYANCY_STIFFNESS;
+            double ratio = MathHelper.clamp(
+                s / targetSub,
+                0.0,
+                PhysicsConfig.MAX_BUOYANCY_RATIO
+            );
+            ay += PhysicsConfig.GRAVITY * ratio;  // net: 0 at equilibrium
         }
 
-        // Integrate Y acceleration into velocity.
+        // Integrate acceleration.
         double newVy = state.velocity.y + ay;
 
-        // ---- Drag --------------------------------------------------------
-        // Applied AFTER acceleration so it damps this tick's result.
-        // Water drag scales with submersion — more submerged = more damping.
-        double dragY = PhysicsConfig.AIR_DRAG + (s * PhysicsConfig.WATER_DRAG);
-        double dragXZ = PhysicsConfig.AIR_DRAG + (s * PhysicsConfig.WATER_DRAG * 0.5);
+        // ---- Drag (applied after acceleration) ---------------------------
+        double dragY  = PhysicsConfig.AIR_DRAG + (s * PhysicsConfig.WATER_DRAG);
+        double dragXZ = PhysicsConfig.AIR_DRAG + (s * PhysicsConfig.WATER_DRAG * 0.3);
 
-        newVy = newVy * (1.0 - dragY);
-        double newVx = state.velocity.x * (1.0 - dragXZ);
-        double newVz = state.velocity.z * (1.0 - dragXZ);
+        newVy          = newVy            * (1.0 - dragY);
+        double newVx   = state.velocity.x * (1.0 - dragXZ);
+        double newVz   = state.velocity.z * (1.0 - dragXZ);
 
         state.velocity = new Vec3d(newVx, newVy, newVz);
 
@@ -111,7 +115,6 @@ public class ShipPhysicsEngine {
         state.position = state.position.add(state.velocity);
         state.position = handleTerrainCollision(state.position);
 
-        // Kill micro-oscillations once nearly at rest.
         if (isAtRest()) {
             state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
         }
@@ -130,7 +133,7 @@ public class ShipPhysicsEngine {
         }
 
         double hullBottomWorldY = state.position.y + hullBounds.minY();
-        double hullHeight = hullBounds.height();
+        double hullHeight       = hullBounds.height();
         if (hullHeight <= 0.0D) return 0.0f;
 
         double submergedDepth = MathHelper.clamp(
@@ -147,13 +150,13 @@ public class ShipPhysicsEngine {
         int maxScan = startY + (hullBounds != null
             ? MathHelper.ceil((float) hullBounds.height()) + 4 : 8);
 
-        double lastWaterY = hullBottomWorldY;
-        boolean sawWater  = false;
+        double  lastWaterY = hullBottomWorldY;
+        boolean sawWater   = false;
 
         for (int y = startY; y <= maxScan; y++) {
             BlockPos pos = new BlockPos(scanX, y, scanZ);
             if (!world.getFluidState(pos).isEmpty()) {
-                sawWater  = true;
+                sawWater   = true;
                 lastWaterY = y + 1.0D;
             } else if (sawWater) {
                 break;
@@ -198,8 +201,12 @@ public class ShipPhysicsEngine {
                 MathHelper.floor(newPos.z)
             );
             if (!world.getBlockState(newBottom).isSolidBlock(world, newBottom)) {
+                // Kill downward momentum and absorb the bounce.
                 state.velocity = new Vec3d(
-                    state.velocity.x, Math.max(0.0D, state.velocity.y), state.velocity.z);
+                    state.velocity.x * (1.0 - PhysicsConfig.FLOOR_BOUNCE_DAMP),
+                    0.0,   // hard-zero Y: no upward rebound from floor
+                    state.velocity.z * (1.0 - PhysicsConfig.FLOOR_BOUNCE_DAMP)
+                );
                 break;
             }
         }

@@ -3,6 +3,9 @@ package net.shasankp000.Ship.Command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.suggestion.SuggestionProvider;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.text.Text;
@@ -11,57 +14,79 @@ import net.shasankp000.Ship.Structure.ShipStructureManager;
 
 import java.util.Collection;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Registers the /ship command tree.
  *
- * Subcommands:
- *   /ship list                — lists all active ships with their IDs and positions
- *   /ship remove <id>         — destroys one ship by UUID (supports partial prefix matching)
- *   /ship removeall           — destroys every active ship (nuclear option)
- *   /ship freeze <id>         — pauses physics on one ship
- *   /ship unfreeze <id>       — resumes physics on one ship
+ *   /ship list
+ *   /ship remove <id>     — tab-completes with live ship IDs
+ *   /ship removeall
+ *   /ship freeze <id>
+ *   /ship unfreeze <id>
  *
- * Requires operator permission level 2 (same as /kill).
+ * Requires op level 2 (same as /kill).
  */
 public final class ShipCommands {
 
     private ShipCommands() {}
+
+    // ---- Suggestion provider: live ship IDs ------------------------------
+
+    private static final SuggestionProvider<ServerCommandSource> SHIP_ID_SUGGESTIONS =
+        (ctx, builder) -> suggestShipIds(builder);
+
+    private static CompletableFuture<Suggestions> suggestShipIds(SuggestionsBuilder builder) {
+        String remaining = builder.getRemaining().toLowerCase();
+        for (ShipStructure s : ShipStructureManager.getInstance().getAllShips()) {
+            String id = s.getShipId().toString();
+            // Show short 8-char prefix as display but insert full UUID as value.
+            String shortId = id.substring(0, 8);
+            String label   = shortId + "  pos=(" + String.format("%.0f,%.0f,%.0f",
+                s.getTransform().worldOffset().x,
+                s.getTransform().worldOffset().y,
+                s.getTransform().worldOffset().z) + ")";
+            if (id.startsWith(remaining) || shortId.startsWith(remaining)) {
+                builder.suggest(id, Text.literal(label));
+            }
+        }
+        return builder.buildFuture();
+    }
+
+    // ---- Command registration --------------------------------------------
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
         dispatcher.register(
             CommandManager.literal("ship")
                 .requires(src -> src.hasPermissionLevel(2))
 
-                // /ship list
                 .then(CommandManager.literal("list")
                     .executes(ShipCommands::executeList)
                 )
 
-                // /ship remove <id>
                 .then(CommandManager.literal("remove")
                     .then(CommandManager.argument("id", StringArgumentType.word())
+                        .suggests(SHIP_ID_SUGGESTIONS)
                         .executes(ctx -> executeRemove(ctx,
                             StringArgumentType.getString(ctx, "id")))
                     )
                 )
 
-                // /ship removeall
                 .then(CommandManager.literal("removeall")
                     .executes(ShipCommands::executeRemoveAll)
                 )
 
-                // /ship freeze <id>
                 .then(CommandManager.literal("freeze")
                     .then(CommandManager.argument("id", StringArgumentType.word())
+                        .suggests(SHIP_ID_SUGGESTIONS)
                         .executes(ctx -> executeFreeze(ctx,
                             StringArgumentType.getString(ctx, "id"), true))
                     )
                 )
 
-                // /ship unfreeze <id>
                 .then(CommandManager.literal("unfreeze")
                     .then(CommandManager.argument("id", StringArgumentType.word())
+                        .suggests(SHIP_ID_SUGGESTIONS)
                         .executes(ctx -> executeFreeze(ctx,
                             StringArgumentType.getString(ctx, "id"), false))
                     )
@@ -69,36 +94,27 @@ public final class ShipCommands {
         );
     }
 
-    // ---- /ship list -------------------------------------------------------
+    // ---- Executors -------------------------------------------------------
 
     private static int executeList(CommandContext<ServerCommandSource> ctx) {
-        Collection<ShipStructure> ships =
-            ShipStructureManager.getInstance().getAllShips();
-
+        Collection<ShipStructure> ships = ShipStructureManager.getInstance().getAllShips();
         if (ships.isEmpty()) {
-            ctx.getSource().sendFeedback(
-                () -> Text.literal("[Ships] No active ships."), false);
+            ctx.getSource().sendFeedback(() -> Text.literal("[Ships] No active ships."), false);
             return 0;
         }
-
         ctx.getSource().sendFeedback(
             () -> Text.literal("[Ships] " + ships.size() + " active ship(s):"), false);
-
         for (ShipStructure s : ships) {
-            String pos = String.format("(%.1f, %.1f, %.1f)",
-                s.getTransform().worldOffset().x,
-                s.getTransform().worldOffset().y,
-                s.getTransform().worldOffset().z);
-            String frozen = s.isPhysicsActive() ? "" : " [FROZEN]";
-            ctx.getSource().sendFeedback(
-                () -> Text.literal("  id=" + s.getShipId() + "  pos=" + pos + frozen),
-                false
-            );
+            String line = "  " + s.getShipId() + "  pos=(" +
+                String.format("%.1f, %.1f, %.1f",
+                    s.getTransform().worldOffset().x,
+                    s.getTransform().worldOffset().y,
+                    s.getTransform().worldOffset().z) + ")" +
+                (s.isPhysicsActive() ? "" : " [FROZEN]");
+            ctx.getSource().sendFeedback(() -> Text.literal(line), false);
         }
         return ships.size();
     }
-
-    // ---- /ship remove <id> ------------------------------------------------
 
     private static int executeRemove(
             CommandContext<ServerCommandSource> ctx, String idArg) {
@@ -115,28 +131,20 @@ public final class ShipCommands {
         return 1;
     }
 
-    // ---- /ship removeall --------------------------------------------------
-
     private static int executeRemoveAll(CommandContext<ServerCommandSource> ctx) {
-        Collection<ShipStructure> ships =
-            ShipStructureManager.getInstance().getAllShips();
+        Collection<ShipStructure> ships = ShipStructureManager.getInstance().getAllShips();
         int count = ships.size();
         if (count == 0) {
             ctx.getSource().sendFeedback(
                 () -> Text.literal("[Ships] No ships to remove."), false);
             return 0;
         }
-        // Copy IDs first — destroy() mutates the backing map.
-        ships.stream()
-             .map(ShipStructure::getShipId)
-             .toList()
+        ships.stream().map(ShipStructure::getShipId).toList()
              .forEach(id -> ShipStructureManager.getInstance().destroy(id));
         ctx.getSource().sendFeedback(
             () -> Text.literal("[Ships] Removed all " + count + " ship(s)."), true);
         return count;
     }
-
-    // ---- /ship freeze|unfreeze <id> ---------------------------------------
 
     private static int executeFreeze(
             CommandContext<ServerCommandSource> ctx, String idArg, boolean freeze) {
@@ -149,30 +157,23 @@ public final class ShipCommands {
         target.setPhysicsActive(!freeze);
         String verb = freeze ? "Frozen" : "Unfrozen";
         ctx.getSource().sendFeedback(
-            () -> Text.literal("[Ships] " + verb + " ship " + target.getShipId() + "."),
-            true
-        );
+            () -> Text.literal("[Ships] " + verb + " ship " + target.getShipId() + "."), true);
         return 1;
     }
 
-    // ---- Helpers ----------------------------------------------------------
+    // ---- Helpers ---------------------------------------------------------
 
-    /**
-     * Resolves a ship by full UUID string or a unique prefix of its UUID.
-     * e.g. "0d4a" matches "0d4a209a-..." if only one ship starts with that prefix.
-     */
+    /** Full UUID or unique prefix match. */
     private static ShipStructure resolveShip(String idArg) {
-        // Try exact UUID match first.
         try {
             UUID exact = UUID.fromString(idArg);
             return ShipStructureManager.getInstance().getShip(exact);
         } catch (IllegalArgumentException ignored) {}
 
-        // Fall back to prefix match.
         ShipStructure match = null;
         for (ShipStructure s : ShipStructureManager.getInstance().getAllShips()) {
             if (s.getShipId().toString().startsWith(idArg)) {
-                if (match != null) return null; // ambiguous
+                if (match != null) return null;
                 match = s;
             }
         }
