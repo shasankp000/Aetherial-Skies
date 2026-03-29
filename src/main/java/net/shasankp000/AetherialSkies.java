@@ -12,6 +12,7 @@ import net.shasankp000.Gravity.GravityData;
 import net.shasankp000.Registry.ModBlocks;
 import net.shasankp000.Registry.ModEntityTypes;
 import net.shasankp000.Registry.ModItems;
+import net.shasankp000.Ship.Physics.ShipTransformManager;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,9 +25,7 @@ public class AetherialSkies implements ModInitializer {
 
     private static final Set<BlockPos> blocksToCheck = new HashSet<>();
 
-    public static Set<BlockPos> getBlocksToCheck() {
-        return blocksToCheck;
-    }
+    public static Set<BlockPos> getBlocksToCheck() { return blocksToCheck; }
 
     @Override
     public void onInitialize() {
@@ -35,14 +34,17 @@ public class AetherialSkies implements ModInitializer {
         ModBlocks.registerModBlocks();
         ModItems.registerModItems();
 
-        // Initialize ShipStructureManager once the server (and its dimensions) are loaded.
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             ShipStructureManager.getInstance().init(server);
-            LOGGER.info("[AetherialSkies] ShipStructureManager initialized.");
+            ShipTransformManager.getInstance().init(server);
+            LOGGER.info("[AetherialSkies] ShipStructureManager + ShipTransformManager initialized.");
         });
 
-        // Gravity block tick processing (unchanged from original).
         ServerTickEvents.END_SERVER_TICK.register(server -> {
+            // Ship physics tick.
+            ShipTransformManager.getInstance().tick();
+
+            // Gravity block tick (unchanged).
             Set<BlockPos> toRemove = new HashSet<>();
             RegistryKey<World> worldRegistryKey =
                 server.getCommandSource().getWorld().getRegistryKey();
@@ -81,8 +83,6 @@ public class AetherialSkies implements ModInitializer {
     }
 
     public static void addBlockToCheck(BlockPos pos) {
-        if (!blocksToCheck.contains(pos)) {
-            blocksToCheck.add(pos);
-        }
+        if (!blocksToCheck.contains(pos)) blocksToCheck.add(pos);
     }
 }
