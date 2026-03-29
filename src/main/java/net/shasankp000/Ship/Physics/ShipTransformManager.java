@@ -9,20 +9,19 @@ import net.shasankp000.Ship.Structure.ShipStructureManager;
 import net.shasankp000.Ship.Transform.ShipTransform;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
  * Drives the physics tick loop for every active ShipStructure.
  *
- * One ShipPhysicsEngine per ship is maintained here. Each server tick:
- *  1. syncFrom(structure)   — read current transform into engine state
- *  2. engine.tick()         — apply gravity / buoyancy / drag
- *  3. applyTo(structure)    — write result back to structure's transform
- *  4. broadcast sync packet — inform all online players of the new transform
- *
- * Uses the overworld as the physics world (fluid checks, terrain collision).
- * Ships are stored in ship_storage but their visual position is in the overworld.
+ * Tick order per ship:
+ *  1. syncFrom(structure)      — read current transform into engine state
+ *  2. engine.tick()            — apply gravity / buoyancy / drag
+ *  3. applyTo(structure)       — write result back to structure's transform
+ *  4. ShipPassengerTracker     — carry players standing on this ship
+ *  5. broadcast sync packet    — inform all online players of new transform
  */
 public final class ShipTransformManager {
 
@@ -38,8 +37,6 @@ public final class ShipTransformManager {
         this.server = server;
     }
 
-    // ---- Called when a ship is deployed (ShipStructureManager.deploy) ----
-
     public void onShipDeployed(ShipStructure structure) {
         ShipPhysicsState state = new ShipPhysicsState(
             structure.getTransform().worldOffset(),
@@ -53,35 +50,35 @@ public final class ShipTransformManager {
         engines.put(structure.getShipId(), engine);
     }
 
-    // ---- Called when a ship is destroyed ---------------------------------
-
     public void onShipDestroyed(UUID shipId) {
         engines.remove(shipId);
     }
 
-    // ---- Server tick (called from AetherialSkies.onInitialize) -----------
-
     public void tick() {
         if (server == null) return;
-        ServerWorld overworld = server.getOverworld();
+
+        List<ServerPlayerEntity> players = server.getPlayerManager().getPlayerList();
 
         for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
             if (!structure.isPhysicsActive()) continue;
 
             ShipPhysicsEngine engine = engines.get(structure.getShipId());
             if (engine == null) {
-                // Engine missing — lazily create (handles world-load restore).
                 onShipDeployed(structure);
                 engine = engines.get(structure.getShipId());
             }
 
+            // 1-3: physics
             engine.syncFrom(structure);
             engine.tick();
             engine.applyTo(structure);
 
-            // Broadcast updated transform to all players.
+            // 4: carry passengers
+            ShipPassengerTracker.tick(structure, players);
+
+            // 5: broadcast
             ShipTransform t = structure.getTransform();
-            for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            for (ServerPlayerEntity player : players) {
                 ShipTransformSyncS2CPacket.send(
                     player,
                     structure.getShipId(),
