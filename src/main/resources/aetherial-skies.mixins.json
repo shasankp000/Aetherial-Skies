@@ -6,7 +6,8 @@
 		"BlockMixin",
 		"WorldMixin",
 		"PlayerEntityMixin",
-		"MixinLivingEntity"
+		"MixinLivingEntity",
+		"ServerWorldShipCollisionMixin"
 	],
 	"client": [
 		"ClientPlayerInteractionManagerMixin",
