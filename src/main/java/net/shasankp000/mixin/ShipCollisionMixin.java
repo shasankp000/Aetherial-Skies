@@ -5,10 +5,8 @@ import net.fabricmc.api.Environment;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.BlockView;
 import net.minecraft.world.chunk.ChunkCache;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
@@ -25,16 +23,14 @@ import net.shasankp000.Ship.Client.ShipCollisionProvider;
  * a rendered ship block, we make every ship block — deck, hull sides,
  * bottom, and helm — solid without placing real blocks in the world.
  *
- * Guard: we only inject when the real world block is NOT already a full
- * solid cube. This covers air, water, lava, and any other non-solid block
- * that might occupy the same position (e.g. submerged hull blocks sit
- * inside water). We never override a real solid block.
+ * Guard: only inject when the real world block does NOT block movement
+ * (i.e. is air, water, lava, seagrass, etc.). This covers all submerged
+ * hull positions and the helm regardless of water level, while never
+ * overriding real solid terrain blocks.
  */
 @Environment(EnvType.CLIENT)
 @Mixin(ChunkCache.class)
 public abstract class ShipCollisionMixin {
-
-    @Shadow public abstract BlockView getWorld();
 
     @Inject(
         method = "getBlockState",
@@ -48,9 +44,10 @@ public abstract class ShipCollisionMixin {
         BlockState returned = cir.getReturnValue();
         if (returned == null) return;
 
-        // Skip if the real world block is already fully solid —
-        // no need to override it and we must not shadow real terrain.
-        if (returned.isFullCube(getWorld(), pos)) return;
+        // Only override non-solid blocks (air, water, lava, etc.).
+        // blocksMovement() returns true for full-cube solid blocks,
+        // so we skip those to never shadow real terrain.
+        if (returned.blocksMovement()) return;
 
         if (ShipCollisionProvider.isShipBlock(pos)) {
             cir.setReturnValue(Blocks.STONE.getDefaultState());
