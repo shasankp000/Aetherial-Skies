@@ -14,28 +14,6 @@ import net.shasankp000.Ship.Transform.ShipTransform;
 
 import java.util.UUID;
 
-/**
- * Waterline-target physics engine.
- *
- * Behaviour by environment:
- *
- *  ON WATER  — PD buoyancy + gravity drives the hull bottom to
- *              (waterSurfaceY - TARGET_DRAFT).  The ship bobs and
- *              settles at the waterline.
- *
- *  ON LAND   — No gravity, no velocity.  The ship sits stationary at
- *              its deploy Y, with preventFloorPenetration() ensuring it
- *              never clips into the ground.  This prevents the ship from
- *              free-falling off screen when deployed away from water.
- *
- * Each tick:
- *  1. Determine environment (water / land) via findWaterSurfaceY().
- *  2. If on water: PD controller + integrate + floor guard.
- *     If on land:  zero velocity + floor guard only.
- *  3. Push result into Jolt as a kinematic body move.
- *  4. After JoltPhysicsSystem.stepSimulation() (called by ShipTransformManager)
- *     read the authoritative position back from Jolt.
- */
 public class ShipPhysicsEngine {
 
     private final ShipPhysicsState state;
@@ -49,16 +27,18 @@ public class ShipPhysicsEngine {
     private int    waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 3;
 
-    private boolean inWater     = false;
-    private boolean wasInWater  = false; // for transition logging
+    private boolean inWater    = false;
+    private boolean wasInWater = false;
+
+    /** Counts ticks since this engine was created; used for early debug logging. */
+    private int tickCount = 0;
+    private static final int DEBUG_TICKS = 10;
 
     public ShipPhysicsEngine(UUID shipId, ShipPhysicsState state, World world) {
         this.shipId = shipId;
         this.state  = state;
         this.world  = world;
     }
-
-    // ---- Hull data -------------------------------------------------------
 
     public void setHullBounds(ShipHullData.HullBounds bounds) {
         this.hullBounds = bounds;
@@ -71,8 +51,6 @@ public class ShipPhysicsEngine {
         this.cachedWaterSurfaceY = Double.NaN;
         this.waterSurfaceCacheTicks = 0;
     }
-
-    // ---- Sync to/from ShipStructure --------------------------------------
 
     public void syncFrom(ShipStructure structure) {
         ShipTransform t = structure.getTransform();
@@ -87,15 +65,12 @@ public class ShipPhysicsEngine {
         );
     }
 
-    // ---- Tick ------------------------------------------------------------
-
     public void tick() {
         refreshWaterSurface();
 
         double hullBottomY = hullBottomWorldY();
         inWater = !Double.isNaN(cachedWaterSurfaceY) && hullBottomY <= cachedWaterSurfaceY;
 
-        // Log water / land transitions.
         if (inWater != wasInWater) {
             AetherialSkies.LOGGER.info(
                 "[ShipPhysicsEngine] Ship {} {} water at y={}",
@@ -105,14 +80,38 @@ public class ShipPhysicsEngine {
             wasInWater = inWater;
         }
 
-        if (inWater) {
-            // ---- Water mode: PD buoyancy + gravity -----------------------
-            double ay = -PhysicsConfig.GRAVITY;
+        // ---- First-N-ticks debug dump ------------------------------------
+        if (tickCount < DEBUG_TICKS) {
+            AetherialSkies.LOGGER.info(
+                "[PhysDebug t={}] ship={} pos.y={} waterY={} hullBottomY={} inWater={} vel.y={} minY={}",
+                tickCount,
+                shipId.toString().substring(0, 8),
+                String.format("%.4f", state.position.y),
+                Double.isNaN(cachedWaterSurfaceY) ? "NaN" : String.format("%.4f", cachedWaterSurfaceY),
+                String.format("%.4f", hullBottomY),
+                inWater,
+                String.format("%.4f", state.velocity.y),
+                hullBounds != null ? String.format("%.4f", hullBounds.minY()) : "null"
+            );
+            tickCount++;
+        }
 
+        if (inWater) {
+            double ay = -PhysicsConfig.GRAVITY;
             double targetY   = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
             double error     = targetY - hullBottomY;
-            double a_buoy    = PhysicsConfig.BUOY_P * error
-                             - PhysicsConfig.BUOY_D * state.velocity.y;
+
+            if (tickCount <= DEBUG_TICKS) {
+                AetherialSkies.LOGGER.info(
+                    "[PhysDebug t={}] targetY={} error={} a_buoy={}",
+                    tickCount - 1,
+                    String.format("%.4f", targetY),
+                    String.format("%.4f", error),
+                    String.format("%.6f", PhysicsConfig.BUOY_P * error - PhysicsConfig.BUOY_D * state.velocity.y)
+                );
+            }
+
+            double a_buoy = PhysicsConfig.BUOY_P * error - PhysicsConfig.BUOY_D * state.velocity.y;
             ay += a_buoy;
 
             double newVy = state.velocity.y + ay;
@@ -128,35 +127,23 @@ public class ShipPhysicsEngine {
                 state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
             }
         } else {
-            // ---- Land mode: static — no gravity, no drift ---------------
-            // Zero velocity so the ship doesn't slide or fall.
             state.velocity = Vec3d.ZERO;
-            // preventFloorPenetration still runs below to push the hull up
-            // if it spawned partially inside a block.
         }
 
-        // Floor penetration guard runs in both modes.
         state.position = preventFloorPenetration(state.position);
 
-        // Push into Jolt (kinematic move).
         if (hullData != null) {
             JoltPhysicsSystem.getInstance().updateBodyTransform(
                 shipId, state.position, state.yaw, hullData);
         }
     }
 
-    /**
-     * Called by ShipTransformManager AFTER stepSimulation() to read back the
-     * Jolt-authoritative position.
-     */
     public void readBackFromJolt() {
         if (hullData == null) return;
         Vec3d joltPos = JoltPhysicsSystem.getInstance()
                 .getBodyPosition(shipId, hullData, state.position);
         state.position = joltPos;
     }
-
-    // ---- Water surface ---------------------------------------------------
 
     private void refreshWaterSurface() {
         if (waterSurfaceCacheTicks <= 0 || Double.isNaN(cachedWaterSurfaceY)) {
@@ -184,8 +171,6 @@ public class ShipPhysicsEngine {
         return state.position.y + offset;
     }
 
-    // ---- Floor penetration guard ----------------------------------------
-
     private Vec3d preventFloorPenetration(Vec3d pos) {
         if (hullBounds == null) return pos;
         double minYOffset = hullBounds.minY();
@@ -197,15 +182,13 @@ public class ShipPhysicsEngine {
             );
             BlockState bs = world.getBlockState(check);
             if (!bs.isSolidBlock(world, check)) break;
-            double blockTop   = check.getY() + 1.0D;
+            double blockTop    = check.getY() + 1.0D;
             double penetration = blockTop - (pos.y + minYOffset);
             pos = pos.add(0.0D, penetration + 0.001D, 0.0D);
             state.velocity = new Vec3d(state.velocity.x, 0.0D, state.velocity.z);
         }
         return pos;
     }
-
-    // ---- Helpers ---------------------------------------------------------
 
     private Vec3d clipVelocity(Vec3d v) {
         double speed = v.length();
@@ -219,7 +202,6 @@ public class ShipPhysicsEngine {
             PhysicsConfig.SETTLE_THRESHOLD * PhysicsConfig.SETTLE_THRESHOLD;
     }
 
-    // ---- Accessors -------------------------------------------------------
     public ShipPhysicsState getState() { return state; }
     public Vec3d getPosition()         { return state.position; }
     public Vec3d getVelocity()         { return state.velocity; }
