@@ -3,7 +3,6 @@ package net.shasankp000.mixin;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.Vec3d;
-import net.shasankp000.Ship.Client.ShipCollisionProvider;
 import net.shasankp000.Ship.Client.ShipTransformCache;
 import net.shasankp000.Ship.ShipCrateService;
 import net.shasankp000.Ship.Transform.ShipTransform;
@@ -19,17 +18,22 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * runs for this tick, we snap the player flush onto any ship deck they
  * are standing on or have just fallen through.
  *
- * This is the VS2 EntityDragger pattern: skip the block-collision pipeline
- * and directly correct the player's Y before Entity#move sees anything wrong.
+ * Horizontal coverage uses a local-space AABB test:
+ *   1. Translate the player's world XZ by the ship's worldOffset.
+ *   2. Inverse-rotate by the ship's yaw to get the player position in
+ *      the ship's local coordinate frame.
+ *   3. Check against the local hull AABB (min/max X/Z across all blocks).
  *
- * We use the ShipTransformCache + ShipCollisionProvider data (same source as
- * the renderer and ChunkCache mixin) to find the deck top Y for each ship.
+ * This is rotation-agnostic: no integer rounding gaps, full deck coverage
+ * at any yaw.
  */
 @Mixin(LivingEntity.class)
 public abstract class MixinLivingEntity {
 
     private static final double SNAP_TOLERANCE = 1.1D;
     private static final double MAX_ABOVE      = 0.55D;
+    /** Small margin added to hull AABB edges so the player doesn't slip off the very edge. */
+    private static final double HULL_MARGIN    = 0.35D;
 
     @Inject(method = "travel", at = @At("HEAD"))
     private void onTravelHead(Vec3d movementInput, CallbackInfo ci) {
@@ -37,10 +41,9 @@ public abstract class MixinLivingEntity {
 
         if (!(self instanceof PlayerEntity player)) return;
         if (player.isSpectator()) return;
-        // Server side only; client handled in MixinClientPlayerEntity
         if (player.getWorld().isClient()) return;
 
-        double bestFloorY = findBestFloorY(player);
+        double bestFloorY = findBestFloorY(player.getX(), player.getZ(), player.getY());
         if (Double.isNaN(bestFloorY)) return;
 
         boolean falling = player.getVelocity().y <= 0.001D;
@@ -48,13 +51,11 @@ public abstract class MixinLivingEntity {
 
         double feetY = player.getY();
         if (feetY < bestFloorY) {
-            // Fell through: push back up
             player.setPosition(player.getX(), bestFloorY, player.getZ());
             Vec3d vel = player.getVelocity();
             player.setVelocity(vel.x, 0.0D, vel.z);
             player.setOnGround(true);
         } else if (feetY <= bestFloorY + MAX_ABOVE) {
-            // Resting on or fractionally above deck: snap flush
             player.setPosition(player.getX(), bestFloorY, player.getZ());
             Vec3d vel = player.getVelocity();
             if (vel.y < 0) player.setVelocity(vel.x, 0.0D, vel.z);
@@ -62,32 +63,18 @@ public abstract class MixinLivingEntity {
         }
     }
 
-    /**
-     * Iterates all cached ships and finds the highest deck-top Y that the
-     * player is horizontally above and within the vertical snap window.
-     *
-     * Uses ShipTransformCache (same data source as ChunkCache mixin and
-     * renderer) so we are consistent with what the player sees.
-     */
-    private static double findBestFloorY(PlayerEntity player) {
-        double px = player.getX();
-        double pz = player.getZ();
-        double feetY = player.getY();
-
+    static double findBestFloorY(double px, double pz, double feetY) {
         double best = Double.NaN;
         for (ShipTransformCache.ClientShip ship : ShipTransformCache.INSTANCE.getAll()) {
             ShipTransform t = ship.transform;
             if (t == null || ship.blocks == null || ship.blocks.isEmpty()) continue;
 
-            // Compute deck top Y for this ship (same logic as ShipPassengerTracker)
             double deckTopY = computeDeckTopY(ship, t);
 
-            // Vertical snap window check
             if (deckTopY > feetY + MAX_ABOVE) continue;
             if (deckTopY < feetY - SNAP_TOLERANCE) continue;
 
-            // Horizontal footprint check: is player above any block of this ship?
-            if (isPlayerAboveShip(px, pz, ship, t)) {
+            if (isPlayerAboveShipLocal(px, pz, ship, t)) {
                 if (Double.isNaN(best) || deckTopY > best) {
                     best = deckTopY;
                 }
@@ -96,7 +83,7 @@ public abstract class MixinLivingEntity {
         return best;
     }
 
-    private static double computeDeckTopY(ShipTransformCache.ClientShip ship, ShipTransform t) {
+    static double computeDeckTopY(ShipTransformCache.ClientShip ship, ShipTransform t) {
         java.util.HashMap<Integer, Integer> layerCount = new java.util.HashMap<>();
         for (ShipCrateService.PackedBlock pb : ship.blocks) {
             int iy = (int) Math.round(pb.localOffset().y);
@@ -113,16 +100,43 @@ public abstract class MixinLivingEntity {
         return t.worldOffset().y + deckLocalY + 1.0D;
     }
 
-    private static boolean isPlayerAboveShip(double px, double pz,
+    /**
+     * Checks whether the world-space XZ point (px, pz) lies within
+     * the ship's hull footprint, accounting for the ship's current yaw.
+     *
+     * Steps:
+     *   1. Translate: move origin to ship's worldOffset centre.
+     *   2. Inverse-rotate by yaw (undo the ship's rotation).
+     *   3. Compare against the local-space AABB built from block offsets.
+     */
+    static boolean isPlayerAboveShipLocal(double px, double pz,
             ShipTransformCache.ClientShip ship, ShipTransform t) {
+
+        // 1. Translate player into ship-centred coordinates
+        double dx = px - t.worldOffset().x;
+        double dz = pz - t.worldOffset().z;
+
+        // 2. Inverse-rotate by ship yaw (renderer uses -yaw, so inverse is +yaw)
+        double rad = Math.toRadians(t.yaw());
+        double cos = Math.cos(rad);
+        double sin = Math.sin(rad);
+        double localX = dx * cos - dz * sin;
+        double localZ = dx * sin + dz * cos;
+
+        // 3. Build local AABB from block offsets and test
+        double minX = Double.POSITIVE_INFINITY, maxX = Double.NEGATIVE_INFINITY;
+        double minZ = Double.POSITIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
         for (ShipCrateService.PackedBlock pb : ship.blocks) {
-            net.minecraft.util.math.BlockPos bp = ShipCollisionProvider.worldPosOf(t, pb);
-            // Player's XZ must be within the 1x1 block column of this block
-            if (px >= bp.getX() && px <= bp.getX() + 1.0D
-             && pz >= bp.getZ() && pz <= bp.getZ() + 1.0D) {
-                return true;
-            }
+            Vec3d lo = pb.localOffset();
+            double bx = lo.x - 0.5D;
+            double bz = lo.z - 0.5D;
+            if (bx < minX) minX = bx;
+            if (bx + 1.0D > maxX) maxX = bx + 1.0D;
+            if (bz < minZ) minZ = bz;
+            if (bz + 1.0D > maxZ) maxZ = bz + 1.0D;
         }
-        return false;
+
+        return localX >= minX - HULL_MARGIN && localX <= maxX + HULL_MARGIN
+            && localZ >= minZ - HULL_MARGIN && localZ <= maxZ + HULL_MARGIN;
     }
 }
