@@ -60,9 +60,10 @@ public class AetherialSkies implements ModInitializer {
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
+            // ShipTransformManager.tick() internally calls:
+            //   engine.tick() -> updateBodyTransform() -> stepSimulation() -> readBackFromJolt()
+            // Do NOT call stepSimulation() again here.
             ShipTransformManager.getInstance().tick();
-            // Step Jolt simulation one tick
-            JoltPhysicsSystem.getInstance().stepSimulation();
 
             Set<BlockPos> toRemove = new HashSet<>();
             RegistryKey<World> worldRegistryKey =
