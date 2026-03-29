@@ -10,6 +10,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import net.shasankp000.Entity.GravityBlockEntity;
 import net.shasankp000.Gravity.GravityData;
+import net.shasankp000.Physics.JoltNativeLoader;
+import net.shasankp000.Physics.JoltPhysicsSystem;
 import net.shasankp000.Registry.ModBlocks;
 import net.shasankp000.Registry.ModEntityTypes;
 import net.shasankp000.Registry.ModItems;
@@ -32,11 +34,14 @@ public class AetherialSkies implements ModInitializer {
     @Override
     public void onInitialize() {
         LOGGER.info("Initializing Aetherial Skies...");
+
+        // Load Jolt native library FIRST before any other Jolt code runs
+        JoltNativeLoader.load();
+
         ModEntityTypes.register();
         ModBlocks.registerModBlocks();
         ModItems.registerModItems();
 
-        // Register /ship command.
         CommandRegistrationCallback.EVENT.register(
             (dispatcher, registryAccess, environment) ->
                 ShipCommands.register(dispatcher)
@@ -45,11 +50,19 @@ public class AetherialSkies implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             ShipStructureManager.getInstance().init(server);
             ShipTransformManager.getInstance().init(server);
-            LOGGER.info("[AetherialSkies] ShipStructureManager + ShipTransformManager initialized.");
+            // Initialise Jolt after the server world is ready
+            JoltPhysicsSystem.getInstance().init();
+            LOGGER.info("[AetherialSkies] ShipStructureManager + ShipTransformManager + Jolt initialized.");
+        });
+
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            JoltPhysicsSystem.getInstance().destroy();
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             ShipTransformManager.getInstance().tick();
+            // Step Jolt simulation one tick
+            JoltPhysicsSystem.getInstance().stepSimulation();
 
             Set<BlockPos> toRemove = new HashSet<>();
             RegistryKey<World> worldRegistryKey =
