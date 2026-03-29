@@ -9,7 +9,8 @@
 	],
 	"client": [
 		"ClientPlayerInteractionManagerMixin",
-		"MinecraftClientMixin"
+		"MinecraftClientMixin",
+		"ShipCollisionMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
