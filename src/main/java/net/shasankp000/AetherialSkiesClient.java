@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
 import net.shasankp000.Client.Renderer.GravityBlockEntityRenderer;
 import net.shasankp000.Client.Renderer.ShipSelectionRenderer;
+import net.shasankp000.Client.Renderer.ShipStructureRenderer;
 import net.shasankp000.Registry.ModEntityTypes;
 import net.shasankp000.Ship.Client.ShipTransformCache;
 import net.shasankp000.Ship.Network.ShipDeployS2CPacket;
@@ -23,6 +24,9 @@ public class AetherialSkiesClient implements ClientModInitializer {
                 GravityBlockEntityRenderer::new
         );
         ShipSelectionRenderer.register();
+
+        // Ship structure block-overlay renderer.
+        ShipStructureRenderer.register();
 
         // ---- Ship network packet receivers --------------------------------
 
