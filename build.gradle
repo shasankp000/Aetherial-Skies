@@ -26,37 +26,21 @@ dependencies {
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-  // Source: https://mvnrepository.com/artifact/com.github.stephengold/jolt-jni-Windows64
-   implementation 'com.github.stephengold:jolt-jni-Windows64:3.9.0'
+	// Jolt Physics JNI - core API (class files only, no natives)
+	implementation 'com.github.stephengold:jolt-jni-Windows64:3.9.0'
 
-  // Source: https://mvnrepository.com/artifact/com.github.stephengold/jolt-jni-Linux64
-  implementation 'com.github.stephengold:jolt-jni-Linux64:3.9.0'
-
-  // Source: https://mvnrepository.com/artifact/com.github.stephengold/jolt-jni-MacOSX_ARM64
-  implementation 'com.github.stephengold:jolt-jni-MacOSX_ARM64:3.9.0'
+	// Platform natives - each jar bundles the native at:
+	//   windows/x86-64/com/github/stephengold/joltjni.dll
+	//   linux/x86-64/com/github/stephengold/libjoltjni.so
+	//   osx/aarch64/com/github/stephengold/libjoltjni.dylib
+	runtimeOnly 'com.github.stephengold:jolt-jni-Linux64:3.9.0'
+	runtimeOnly 'com.github.stephengold:jolt-jni-MacOSX_ARM64:3.9.0'
 }
 
 jar {
 	inputs.property "archivesName", project.base.archivesName
 	from("LICENSE") {
 		rename { "${it}_${inputs.properties.archivesName}" }
-	}
-	// Bundle all native libs flat at the jar root for the classpath-resource
-	// fallback in JoltNativeLoader ("/joltjni.dll" etc.) used in production.
-	from {
-		configurations.joltLibs.collect { it.isDirectory() ? it : zipTree(it) }
-	} {
-		exclude 'META-INF/MANIFEST.MF'
-		exclude 'META-INF/*.SF'
-		exclude 'META-INF/*.DSA'
-		exclude 'META-INF/*.RSA'
-		duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-		eachFile { details ->
-			def fn = details.name
-			if (fn.endsWith('.dll') || fn.endsWith('.so') || fn.endsWith('.dylib')) {
-				details.path = fn  // flatten to jar root
-			}
-		}
 	}
 }
 
