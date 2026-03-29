@@ -1,6 +1,7 @@
 package net.shasankp000;
 
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.BlockState;
@@ -12,6 +13,7 @@ import net.shasankp000.Gravity.GravityData;
 import net.shasankp000.Registry.ModBlocks;
 import net.shasankp000.Registry.ModEntityTypes;
 import net.shasankp000.Registry.ModItems;
+import net.shasankp000.Ship.Command.ShipCommands;
 import net.shasankp000.Ship.Physics.ShipTransformManager;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
 import org.slf4j.Logger;
@@ -34,6 +36,12 @@ public class AetherialSkies implements ModInitializer {
         ModBlocks.registerModBlocks();
         ModItems.registerModItems();
 
+        // Register /ship command.
+        CommandRegistrationCallback.EVENT.register(
+            (dispatcher, registryAccess, environment) ->
+                ShipCommands.register(dispatcher)
+        );
+
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             ShipStructureManager.getInstance().init(server);
             ShipTransformManager.getInstance().init(server);
@@ -41,10 +49,8 @@ public class AetherialSkies implements ModInitializer {
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            // Ship physics tick.
             ShipTransformManager.getInstance().tick();
 
-            // Gravity block tick (unchanged).
             Set<BlockPos> toRemove = new HashSet<>();
             RegistryKey<World> worldRegistryKey =
                 server.getCommandSource().getWorld().getRegistryKey();
