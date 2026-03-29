@@ -67,14 +67,13 @@ public class AetherialSkies implements ModInitializer {
         // handshake is complete, so canSend() will return true here.
         // We replay the full ShipDeployS2CPacket for every ship already active
         // so the client's ShipTransformCache is populated before the first
-        // render tick. Without this, any ship deployed before the player
-        // joined (including ships from a previous session) would be invisible.
+        // render tick.
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayerEntity player = handler.getPlayer();
             for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
                 ShipTransform t = structure.getTransform();
                 LOGGER.info("[AetherialSkies] Replaying ship deploy to {}: ship {}",
-                    player.getNameForScoreboard(),
+                    player.getName().getString(),
                     structure.getShipId().toString().substring(0, 8));
                 ShipDeployS2CPacket.send(
                     player,
