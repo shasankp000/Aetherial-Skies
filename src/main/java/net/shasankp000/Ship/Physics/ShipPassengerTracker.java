@@ -12,13 +12,18 @@ import net.shasankp000.Ship.Transform.ShipTransform;
  *
  * Responsibilities:
  *  - Detect if a player's XZ feet position is within the ship's deck footprint.
- *  - If yes, add the ship's XZ velocity to the player so they ride with it.
+ *  - Y-snap: if the player is within snap range of the deck top, set their
+ *    position flush on the deck so they never fall through.
+ *  - Carry player horizontally with the ship's XZ velocity.
  *
- * What this does NOT do:
- *  - No requestTeleport / Y snapping. The client-side ShipCollisionMixin
- *    (ChunkCache mixin) already makes ship blocks solid, so vanilla collision
- *    keeps the player on the deck surface naturally. Calling requestTeleport
- *    every tick resets the client's velocity to zero and causes the slowness.
+ * Why Y-snap instead of relying on ChunkCache ghost blocks:
+ *  The ChunkCache mixin only fires for block queries initiated by the client's
+ *  own collision engine. When the ship entity moves, the player's position
+ *  relative to the ship changes each tick, and Minecraft's ChunkCache window
+ *  may not include the ship's rendered block positions (they are not real blocks).
+ *  The result is the player falls through. The VS2 solution (EntityDragger) is
+ *  to skip the block-collision pipeline entirely and directly set the player's
+ *  Y position before vanilla physics runs. We do the same here.
  */
 public final class ShipPassengerTracker {
 
@@ -27,6 +32,11 @@ public final class ShipPassengerTracker {
     private static final double ABOVE_TOLERANCE  = 4.0D;
     private static final double BELOW_TOLERANCE  = 1.5D;
     private static final double FOOTPRINT_MARGIN = 0.3D;
+
+    /** How far below the deck top we still snap up (catches one-tick fall-through). */
+    private static final double SNAP_DOWN_TOLERANCE = 1.1D;
+    /** How far above the deck top we still snap down (prevents snapping mid-jump). */
+    private static final double SNAP_UP_TOLERANCE   = 0.55D;
 
     public static void tick(ShipStructure structure, Iterable<ServerPlayerEntity> players) {
         ShipTransform  t      = structure.getTransform();
@@ -64,9 +74,27 @@ public final class ShipPassengerTracker {
 
             structure.addBoardedPlayer(player.getUuid());
 
-            // Carry player with ship's horizontal motion only.
-            // addVelocity blends with the player's own input velocity
-            // and does NOT reset the client's movement state.
+            // --- Y-snap: keep player on deck surface (VS2-style) ---
+            // Only snap when the player is falling or stationary, not jumping.
+            boolean falling = player.getVelocity().y <= 0.001D;
+            if (falling) {
+                double feetY = feet.y;
+                if (feetY < deckTopY) {
+                    // Fell through: push back up
+                    player.setPosition(feet.x, deckTopY, feet.z);
+                    Vec3d vel = player.getVelocity();
+                    player.setVelocity(vel.x, 0.0D, vel.z);
+                    player.setOnGround(true);
+                } else if (feetY <= deckTopY + SNAP_UP_TOLERANCE) {
+                    // Resting on or fractionally above deck: snap flush
+                    player.setPosition(feet.x, deckTopY, feet.z);
+                    Vec3d vel = player.getVelocity();
+                    if (vel.y < 0) player.setVelocity(vel.x, 0.0D, vel.z);
+                    player.setOnGround(true);
+                }
+            }
+
+            // Carry player with ship's horizontal motion.
             if (shipMoving) {
                 player.addVelocity(shipVel.x, 0.0, shipVel.z);
                 player.velocityModified = true;

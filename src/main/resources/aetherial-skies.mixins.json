@@ -5,12 +5,14 @@
 	"mixins": [
 		"BlockMixin",
 		"WorldMixin",
-		"PlayerEntityMixin"
+		"PlayerEntityMixin",
+		"MixinLivingEntity"
 	],
 	"client": [
 		"ClientPlayerInteractionManagerMixin",
 		"MinecraftClientMixin",
-		"ShipCollisionMixin"
+		"ShipCollisionMixin",
+		"MixinClientPlayerEntity"
 	],
 	"injectors": {
 		"defaultRequire": 1
