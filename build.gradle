@@ -14,12 +14,6 @@ repositories {
 	mavenCentral()
 }
 
-configurations {
-	joltLibs
-	compileClasspath.extendsFrom joltLibs
-	runtimeClasspath.extendsFrom joltLibs
-}
-
 fabricApi {
 	configureDataGeneration {
 		client = true
@@ -32,37 +26,14 @@ dependencies {
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-	joltLibs files('libs/jolt-jni-Windows64-3.9.0.jar')
-	joltLibs files('libs/jolt-jni-Linux64-3.9.0.jar')
-	joltLibs files('libs/jolt-jni-MacOSX64-3.9.0.jar')
-	joltLibs files('libs/jolt-jni-MacOSX_ARM64-3.9.0.jar')
-}
+  // Source: https://mvnrepository.com/artifact/com.github.stephengold/jolt-jni-Windows64
+   implementation 'com.github.stephengold:jolt-jni-Windows64:3.9.0'
 
-// ---------------------------------------------------------------------------
-// Build the jolt.libs.path value from the statically-known libs/ paths.
-// We deliberately do NOT call configurations.joltLibs.resolvedConfiguration
-// here because that would force dependency resolution during the configuration
-// phase and corrupt Loom's internal repository state.
-// ---------------------------------------------------------------------------
-def joltJarNames = [
-	'jolt-jni-Windows64-3.9.0.jar',
-	'jolt-jni-Linux64-3.9.0.jar',
-	'jolt-jni-MacOSX64-3.9.0.jar',
-	'jolt-jni-MacOSX_ARM64-3.9.0.jar',
-]
-def joltLibsPathValue = joltJarNames
-	.collect { new File(projectDir, "libs/${it}").absolutePath }
-	.join(';')
+  // Source: https://mvnrepository.com/artifact/com.github.stephengold/jolt-jni-Linux64
+  implementation 'com.github.stephengold:jolt-jni-Linux64:3.9.0'
 
-loom {
-	runs {
-		client {
-			vmArgs "-Djolt.libs.path=${joltLibsPathValue}"
-		}
-		server {
-			vmArgs "-Djolt.libs.path=${joltLibsPathValue}"
-		}
-	}
+  // Source: https://mvnrepository.com/artifact/com.github.stephengold/jolt-jni-MacOSX_ARM64
+  implementation 'com.github.stephengold:jolt-jni-MacOSX_ARM64:3.9.0'
 }
 
 jar {
