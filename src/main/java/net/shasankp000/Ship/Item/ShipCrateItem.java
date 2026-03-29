@@ -16,6 +16,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 import net.minecraft.world.World;
+import net.shasankp000.AetherialSkies;
 import net.shasankp000.Ship.ShipHullData;
 import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
@@ -77,7 +78,7 @@ public class ShipCrateItem extends Item {
 
         Vec3d spawnPos = findWaterSurface(world, clickedPos);
         if (spawnPos == null) {
-            return new DeployResult(false, "Deployment blocked: no open water surface near that position.");
+            return new DeployResult(false, "Deployment blocked: no open water surface at that XZ position.");
         }
 
         float yaw = player.getYaw() - hullData.helmYawDegrees();
@@ -85,6 +86,8 @@ public class ShipCrateItem extends Item {
         try {
             ShipStructure ship = ShipStructureManager.getInstance().deploy(hullData, spawnPos, yaw);
             if (!player.isCreative()) stack.decrement(1);
+            AetherialSkies.LOGGER.info("[ShipCrateItem] Deployed ship {} at spawnPos={}",
+                ship.getShipId().toString().substring(0, 8), spawnPos);
             return new DeployResult(true,
                 "Ship deployed at y=" + String.format("%.1f", spawnPos.y)
                 + " (id: " + ship.getShipId().toString().substring(0, 8) + ").");
@@ -96,51 +99,31 @@ public class ShipCrateItem extends Item {
     /**
      * Finds the TRUE water surface at the clicked XZ column.
      *
-     * Strategy:
-     *  1. Scan downward from clickedPos+3 to find ANY still-water block.
-     *  2. From that block, walk UPWARD to find the topmost contiguous
-     *     water block — this is the real ocean/lake surface even if the
-     *     player clicked a submerged block deep in the ocean.
-     *  3. Require the block directly above the topmost water to be air
-     *     (open surface, not ice or a roof).
-     *  4. Return (bx+0.5, surfaceY+1.0, bz+0.5) — the top face of the
-     *     surface water block, which is where the ship hull bottom sits.
+     * Scans from world top downward, completely ignoring clickedPos.y.
+     * Returns the top face of the highest still-water block that has
+     * air directly above it, or null if no such surface exists.
      *
-     * This prevents deploying into submerged rock when clicking deep water.
+     * This correctly handles deep oceans where the player clicks a
+     * submerged block far below the actual water surface.
      */
     private static Vec3d findWaterSurface(ServerWorld world, BlockPos clickedPos) {
         int bx = clickedPos.getX();
         int bz = clickedPos.getZ();
-        int top    = world.getTopY() - 1;
-        int startY = Math.min(clickedPos.getY() + 3, top - 1);
-        int endY   = Math.max(clickedPos.getY() - 32, world.getBottomY() + 1);
+        int scanTop    = world.getTopY() - 2;
+        int scanBottom = world.getBottomY() + 1;
 
-        // Step 1: find any still-water block scanning downward.
-        int firstWaterY = Integer.MIN_VALUE;
-        for (int y = startY; y >= endY; y--) {
-            if (world.getBlockState(new BlockPos(bx, y, bz)).getFluidState().isStill()) {
-                firstWaterY = y;
-                break;
+        for (int y = scanTop; y >= scanBottom; y--) {
+            BlockPos pos = new BlockPos(bx, y, bz);
+            if (world.getBlockState(pos).getFluidState().isStill()
+                    && world.getBlockState(pos.up()).isAir()) {
+                double surfaceY = y + 1.0;
+                AetherialSkies.LOGGER.info(
+                    "[ShipCrateItem] Water surface found at y={} (clicked y={})",
+                    surfaceY, clickedPos.getY());
+                return new Vec3d(bx + 0.5, surfaceY, bz + 0.5);
             }
         }
-        if (firstWaterY == Integer.MIN_VALUE) return null;
-
-        // Step 2: walk upward from firstWaterY to find the topmost
-        // contiguous water block (the real surface).
-        int surfaceY = firstWaterY;
-        for (int y = firstWaterY + 1; y <= Math.min(firstWaterY + 64, top); y++) {
-            if (world.getBlockState(new BlockPos(bx, y, bz)).getFluidState().isStill()) {
-                surfaceY = y;
-            } else {
-                break;
-            }
-        }
-
-        // Step 3: the block above the topmost water must be air.
-        if (!world.getBlockState(new BlockPos(bx, surfaceY + 1, bz)).isAir()) return null;
-
-        // Step 4: ship worldOffset = top face of surface water block.
-        return new Vec3d(bx + 0.5, surfaceY + 1.0, bz + 0.5);
+        return null;
     }
 
     private record DeployResult(boolean success, String message) {}
