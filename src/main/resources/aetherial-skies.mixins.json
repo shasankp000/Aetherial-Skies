@@ -3,11 +3,9 @@
 	"package": "net.shasankp000.mixin",
 	"compatibilityLevel": "JAVA_17",
 	"mixins": [
-      "BlockMixin",
+		"BlockMixin",
 		"WorldMixin",
-		"PlayerEntityMixin",
-		"BoatEntityMixin",
-		"EntityTickInvoker"
+		"PlayerEntityMixin"
 	],
 	"client": [
 		"ClientPlayerInteractionManagerMixin",

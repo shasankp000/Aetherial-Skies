@@ -9,9 +9,14 @@ import net.minecraft.registry.Registry;
 import net.minecraft.util.Identifier;
 import net.shasankp000.AetherialSkies;
 import net.shasankp000.Entity.GravityBlockEntity;
-import net.shasankp000.Entity.ShipBoatEntity;
 
+/**
+ * Entity type registry.
+ * ShipBoatEntity has been removed — ships are now rendered as real blocks
+ * in the ship_storage dimension with a client-side transform overlay.
+ */
 public final class ModEntityTypes {
+
     public static final EntityType<GravityBlockEntity> GRAVITY_BLOCK_ENTITY =
             Registry.register(
                     Registries.ENTITY_TYPE,
@@ -23,21 +28,9 @@ public final class ModEntityTypes {
                             .build()
             );
 
-    public static final EntityType<ShipBoatEntity> SHIP_BOAT_ENTITY =
-            Registry.register(
-                    Registries.ENTITY_TYPE,
-                    new Identifier(AetherialSkies.MOD_ID, "ship_boat"),
-                    FabricEntityTypeBuilder.<ShipBoatEntity>create(SpawnGroup.MISC, ShipBoatEntity::new)
-                            .dimensions(EntityDimensions.changing(1.375f, 0.5625f))
-                            .trackRangeBlocks(128)
-                            .trackedUpdateRate(1)
-                            .build()
-            );
-
-    private ModEntityTypes() {
-    }
+    private ModEntityTypes() {}
 
     public static void register() {
-        // Static registration side effects.
+        // static initialiser side-effects only
     }
 }
