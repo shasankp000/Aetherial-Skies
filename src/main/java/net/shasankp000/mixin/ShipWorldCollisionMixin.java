@@ -4,8 +4,8 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -13,26 +13,21 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import net.shasankp000.Ship.Client.ShipCollisionProvider;
 
 /**
- * CLIENT-ONLY mixin on ClientWorld.
+ * CLIENT-ONLY mixin on World (not ClientWorld).
  *
- * ChunkCache.getBlockState() is only called by the block-voxel-shape
- * collision engine (Entity#move). Swim physics uses a completely different
- * code path:
+ * getBlockState() is declared on World and inherited by ClientWorld —
+ * Mixin cannot resolve the descriptor when targeting a subclass that
+ * only inherits the method. Targeting World covers ClientWorld calls.
  *
- *   Entity#updateSwimming  -> World#getBlockState (to find water)
- *   Entity#isInsideWall    -> World#getBlockState (to find solid blocks)
- *   LivingEntity#travel    -> World#getFluidState (buoyancy / swim speed)
+ * A isClient() guard ensures we only act client-side so server world
+ * queries are never affected.
  *
- * All of these call ClientWorld#getBlockState directly, bypassing ChunkCache
- * entirely. This mixin intercepts those calls so that swim movement also
- * sees solid stone at every ship-block position, preventing the player from
- * swimming up through the hull from below or through the sides.
- *
- * Same guard as ShipCollisionMixin: only override air and fluid blocks,
- * never real solid terrain.
+ * This intercepts the swim physics path (Entity#updateSwimming,
+ * isInsideWall, LivingEntity#travel) which calls World#getBlockState
+ * directly, bypassing ChunkCache entirely.
  */
 @Environment(EnvType.CLIENT)
-@Mixin(ClientWorld.class)
+@Mixin(World.class)
 public abstract class ShipWorldCollisionMixin {
 
     @Inject(
@@ -44,9 +39,11 @@ public abstract class ShipWorldCollisionMixin {
             BlockPos pos,
             CallbackInfoReturnable<BlockState> cir
     ) {
+        World self = (World)(Object) this;
+        if (!self.isClient()) return;  // server worlds: never touch
+
         BlockState state = cir.getReturnValue();
         if (state == null) return;
-
         if (!isAirOrFluid(state)) return;
 
         if (ShipCollisionProvider.isShipBlock(pos)) {
@@ -55,11 +52,8 @@ public abstract class ShipWorldCollisionMixin {
     }
 
     private static boolean isAirOrFluid(BlockState state) {
-        if (state.isAir()) return true;
-        if (state.isOf(Blocks.WATER))         return true;
-        if (state.isOf(Blocks.LAVA))          return true;
-        if (state.isOf(Blocks.FLOWING_WATER)) return true;
-        if (state.isOf(Blocks.FLOWING_LAVA))  return true;
-        return false;
+        return state.isAir()
+            || state.isOf(Blocks.WATER)
+            || state.isOf(Blocks.LAVA);
     }
 }
