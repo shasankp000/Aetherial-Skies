@@ -15,8 +15,7 @@ repositories {
 }
 
 configurations {
-	// A plain (non-mod) configuration that bypasses Fabric Loom remapping.
-	// Use this for pure-Java libraries that are NOT Fabric mods.
+	// Plain (non-mod) configuration that bypasses Fabric Loom remapping.
 	joltLibs
 	compileClasspath.extendsFrom joltLibs
 	runtimeClasspath.extendsFrom joltLibs
@@ -29,29 +28,26 @@ fabricApi {
 }
 
 dependencies {
-	// To change the versions see the gradle.properties file
 	minecraft "net.minecraft:minecraft:${project.minecraft_version}"
 	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-
-	// Fabric API
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-	// Jolt-JNI: resolved outside Loom remapping pipeline
-	joltLibs "com.github.stephengold:jolt-jni:${project.jolt_jni_version}"
-	joltLibs "com.github.stephengold:jolt-jni-Windows64:${project.jolt_jni_version}"
-	joltLibs "com.github.stephengold:jolt-jni-Linux64:${project.jolt_jni_version}"
-	joltLibs "com.github.stephengold:jolt-jni-MacOSX64:${project.jolt_jni_version}"
-	joltLibs "com.github.stephengold:jolt-jni-MacOSX_ARM64:${project.jolt_jni_version}"
+	// Jolt-JNI: Windows64 jar contains all Java API classes — used for compilation.
+	// All 4 platform jars are included at runtime so the mod works on any OS.
+	// Resolved from local libs/ directory to bypass Fabric Loom's Maven interception.
+	joltLibs files('libs/jolt-jni-Windows64-3.9.0.jar')   // API + Windows native
+	joltLibs files('libs/jolt-jni-Linux64-3.9.0.jar')     // Linux native
+	joltLibs files('libs/jolt-jni-MacOSX64-3.9.0.jar')    // macOS x64 native
+	joltLibs files('libs/jolt-jni-MacOSX_ARM64-3.9.0.jar') // macOS arm64 native
 }
 
-// Bundle jolt jars into the final mod jar
+// Bundle all jolt-jni jars into the final mod jar
 jar {
 	inputs.property "archivesName", project.base.archivesName
 	from("LICENSE") {
 		rename { "${it}_${inputs.properties.archivesName}" }
 	}
-	// Include all jolt-jni jars (API + all platform natives) inside the mod jar
 	from {
 		configurations.joltLibs.collect { it.isDirectory() ? it : zipTree(it) }
 	} {
