@@ -1,52 +1,56 @@
 package net.shasankp000.Ship.Physics;
 
 /**
- * Physics configuration constants for ship simulation.
+ * Physics constants for the waterline-target model.
  *
- * Buoyancy model (proportional lift):
- *   buoyancy_accel = GRAVITY * clamp(s / targetSubmersion, 0, MAX_BUOYANCY_RATIO)
+ * The engine drives the hull bottom toward waterSurfaceY using a
+ * PD controller (proportional + derivative) rather than a submersion
+ * ratio spring.  This guarantees the ship settles at the waterline
+ * regardless of density or pool depth.
  *
- * This guarantees that at the target waterline the upward buoyancy exactly
- * cancels gravity, so the ship neither sinks nor rockets.
- * WATER_DRAG then damps any residual oscillation.
+ * Tuning:
+ *   BUOY_P  – proportional gain.  Higher = faster correction, but
+ *              over-damped requires BUOY_D big enough.
+ *   BUOY_D  – derivative (velocity) damping.  Critical damp condition:
+ *              BUOY_D ≥ 2 * sqrt(BUOY_P).  We use ~3× for over-damping.
+ *   With P=0.06, critical D = 2*sqrt(0.06) ≈ 0.49.  We use D=0.55.
  */
 public class PhysicsConfig {
 
     private PhysicsConfig() {}
 
     /** Gravity acceleration (blocks/tick²). */
-    public static final double GRAVITY             = 0.04D;
+    public static final double GRAVITY          = 0.04D;
+
+    /** Buoyancy proportional gain (spring toward waterline). */
+    public static final double BUOY_P           = 0.06D;
 
     /**
-     * Maximum buoyancy multiplier of gravity.
-     * At s = targetSubmersion the ratio is 1.0 (exact balance).
-     * At s = targetSubmersion * MAX_BUOYANCY_RATIO the force is capped.
-     * Keeping this close to 1.0 prevents violent overcorrection upward.
+     * Buoyancy derivative gain (damps velocity when near waterline).
+     * Must satisfy BUOY_D >= 2*sqrt(BUOY_P) for over-damped settling.
+     * 2*sqrt(0.06) = 0.49 → we use 0.55 (safely over-damped).
      */
-    public static final double MAX_BUOYANCY_RATIO  = 1.4D;
-
-    /** Drag in air per tick (multiplicative: v *= 1 - AIR_DRAG). */
-    public static final double AIR_DRAG            = 0.02D;
+    public static final double BUOY_D           = 0.55D;
 
     /**
-     * Additional drag per unit submersion when in water.
-     * Must over-damp any residual oscillation.
-     * Tuned so that a fully submerged ship loses ~35% of Y velocity per tick.
+     * How many blocks below the water surface the hull bottom should rest.
+     * 0.0 = hull bottom exactly at waterline (boat floats on surface).
+     * Positive = partially submerged draft.
      */
-    public static final double WATER_DRAG          = 0.35D;
+    public static final double TARGET_DRAFT     = 0.2D;
 
-    /**
-     * Extra damping applied to Y velocity when the hull bottom hits the
-     * terrain collision floor. Absorbs the bounce.
-     */
-    public static final double FLOOR_BOUNCE_DAMP   = 0.1D;
+    /** Drag in air (multiplicative, per tick). */
+    public static final double AIR_DRAG         = 0.02D;
 
-    /** Hard velocity cap (blocks/tick). */
-    public static final double MAX_VELOCITY        = 0.5D;
+    /** Extra drag when hull is touching water. */
+    public static final double WATER_DRAG       = 0.15D;
 
-    /** Speed below which settle-damping kicks in. */
-    public static final double SETTLE_THRESHOLD    = 0.002D;
+    /** Hard velocity cap (blocks/tick). Prevents tunnelling. */
+    public static final double MAX_VELOCITY     = 0.4D;
 
-    /** Velocity multiplier applied when at rest (kills micro-oscillations). */
-    public static final double SETTLE_DAMPING      = 0.4D;
+    /** Speed below which the ship is considered at rest. */
+    public static final double SETTLE_THRESHOLD = 0.001D;
+
+    /** Velocity multiplier applied when at rest. */
+    public static final double SETTLE_DAMPING   = 0.3D;
 }

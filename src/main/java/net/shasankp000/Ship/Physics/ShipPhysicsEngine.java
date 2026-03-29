@@ -1,8 +1,8 @@
 package net.shasankp000.Ship.Physics;
 
 import net.minecraft.block.BlockState;
+import net.minecraft.fluid.FluidState;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -11,21 +11,22 @@ import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Transform.ShipTransform;
 
 /**
- * Core physics engine for ship simulation.
+ * Waterline-target physics engine.
  *
- * Buoyancy model — proportional lift:
- *   buoyancy_accel = GRAVITY × clamp(s / targetSubmersion, 0, MAX_RATIO)
+ * Instead of computing a submersion ratio and fighting density arithmetic,
+ * we directly drive the hull bottom toward (waterSurfaceY - TARGET_DRAFT)
+ * using a PD controller:
  *
- * At the equilibrium waterline (s == targetSubmersion) buoyancy exactly
- * cancels gravity.  WATER_DRAG damps the approach so the ship settles
- * smoothly without oscillating.
+ *   error    = targetY - hullBottomY          (positive = hull is too high, needs to go down... wait
+ *              actually positive = hull bottom is below target = needs upward push)
+ *   a_buoy   = BUOY_P * error - BUOY_D * vy   (proportional + derivative damping)
+ *   a_net_y  = -GRAVITY + a_buoy              (only when hull is at or below water surface)
  *
- * Tick order:
- *  1. Compute submersion ratio s.
- *  2. Compute net Y acceleration (gravity + buoyancy).
- *  3. Integrate into velocity.
- *  4. Apply multiplicative drag AFTER integration (damps this tick's impulse).
- *  5. Clamp, integrate position, collide.
+ * When the hull is above the water entirely, a_buoy = 0 and the ship falls
+ * under gravity until it touches the waterline.
+ *
+ * This model is immune to density misconfiguration and pool depth issues.
+ * It will always settle the hull bottom at (waterSurface - TARGET_DRAFT).
  */
 public class ShipPhysicsEngine {
 
@@ -37,7 +38,10 @@ public class ShipPhysicsEngine {
 
     private double cachedWaterSurfaceY    = Double.NaN;
     private int    waterSurfaceCacheTicks = 0;
-    private static final int WATER_SURFACE_CACHE_TICKS = 5;
+    private static final int WATER_SURFACE_CACHE_TICKS = 3;
+
+    // Whether the hull was touching water last tick (for drag switch).
+    private boolean inWater = false;
 
     public ShipPhysicsEngine(ShipPhysicsState state, World world) {
         this.state = state;
@@ -76,141 +80,126 @@ public class ShipPhysicsEngine {
     // ---- Tick ------------------------------------------------------------
 
     public void tick() {
-        float  s              = calculateBuoyancy();   // 0 = in air, 1 = fully submerged
-        double targetSub      = (hullData != null)
-            ? Math.max(0.01, hullData.effectiveRelativeDensity())
-            : 0.5;
+        refreshWaterSurface();
 
-        // ---- Net vertical acceleration -----------------------------------
-        // Gravity always acts downward.
+        double hullBottomY = hullBottomWorldY();
+        inWater = !Double.isNaN(cachedWaterSurfaceY) && hullBottomY <= cachedWaterSurfaceY;
+
+        // ---- Vertical dynamics ------------------------------------------
         double ay = -PhysicsConfig.GRAVITY;
 
-        // Proportional buoyancy: lifts exactly as hard as gravity when the
-        // hull is at the target waterline, less when higher, more when lower
-        // (capped so it can’t fling the ship violently out of the water).
-        if (s > 0.0f) {
-            double ratio = MathHelper.clamp(
-                s / targetSub,
-                0.0,
-                PhysicsConfig.MAX_BUOYANCY_RATIO
-            );
-            ay += PhysicsConfig.GRAVITY * ratio;  // net: 0 at equilibrium
+        if (inWater) {
+            // Target: hull bottom sits TARGET_DRAFT below water surface.
+            double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
+            // error > 0 → hull bottom is above target → needs to go down (negative push, but
+            // wait: if hullBottomY < targetY then error < 0 → needs upward push)
+            double error = targetY - hullBottomY;  // positive = hull too high above bottom target = push down? No.
+            // Positive error means hullBottomY < targetY (hull is too low, submerged too deep) → push UP.
+            double a_buoy = PhysicsConfig.BUOY_P * error
+                          - PhysicsConfig.BUOY_D * state.velocity.y;
+            ay += a_buoy;
         }
 
-        // Integrate acceleration.
+        // ---- Integrate Y -------------------------------------------------
         double newVy = state.velocity.y + ay;
 
-        // ---- Drag (applied after acceleration) ---------------------------
-        double dragY  = PhysicsConfig.AIR_DRAG + (s * PhysicsConfig.WATER_DRAG);
-        double dragXZ = PhysicsConfig.AIR_DRAG + (s * PhysicsConfig.WATER_DRAG * 0.3);
-
-        newVy          = newVy            * (1.0 - dragY);
-        double newVx   = state.velocity.x * (1.0 - dragXZ);
-        double newVz   = state.velocity.z * (1.0 - dragXZ);
+        // ---- Drag --------------------------------------------------------
+        double drag = PhysicsConfig.AIR_DRAG + (inWater ? PhysicsConfig.WATER_DRAG : 0.0);
+        newVy          = newVy            * (1.0 - drag);
+        double newVx   = state.velocity.x * (1.0 - drag);
+        double newVz   = state.velocity.z * (1.0 - drag);
 
         state.velocity = new Vec3d(newVx, newVy, newVz);
-
-        // ---- Clamp, integrate, collide -----------------------------------
         state.velocity = clipVelocity(state.velocity);
-        state.position = state.position.add(state.velocity);
-        state.position = handleTerrainCollision(state.position);
 
+        // ---- Integrate position ------------------------------------------
+        state.position = state.position.add(state.velocity);
+
+        // ---- Hard floor: never let hull bottom go below solid terrain ----
+        state.position = preventFloorPenetration(state.position);
+
+        // ---- Settle ------------------------------------------------------
         if (isAtRest()) {
             state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
         }
     }
 
-    // ---- Internal helpers ------------------------------------------------
+    // ---- Water surface ---------------------------------------------------
 
-    private float calculateBuoyancy() {
-        if (hullBounds == null || hullData == null) return 0.0f;
-
+    private void refreshWaterSurface() {
         if (waterSurfaceCacheTicks <= 0 || Double.isNaN(cachedWaterSurfaceY)) {
             cachedWaterSurfaceY = findWaterSurfaceY();
             waterSurfaceCacheTicks = WATER_SURFACE_CACHE_TICKS;
         } else {
             waterSurfaceCacheTicks--;
         }
-
-        double hullBottomWorldY = state.position.y + hullBounds.minY();
-        double hullHeight       = hullBounds.height();
-        if (hullHeight <= 0.0D) return 0.0f;
-
-        double submergedDepth = MathHelper.clamp(
-            cachedWaterSurfaceY - hullBottomWorldY, 0.0D, hullHeight);
-        return (float) (submergedDepth / hullHeight);
     }
 
+    /**
+     * Scans downward from the hull bottom position to find the first water
+     * block column, returning the Y of the water surface (top of water block).
+     * Returns NaN if no water is found within scan range.
+     */
     private double findWaterSurfaceY() {
-        double hullBottomWorldY = state.position.y +
-            (hullBounds != null ? hullBounds.minY() : -0.5D);
-        int scanX  = MathHelper.floor(state.position.x);
-        int scanZ  = MathHelper.floor(state.position.z);
-        int startY = MathHelper.floor(hullBottomWorldY) - 1;
-        int maxScan = startY + (hullBounds != null
-            ? MathHelper.ceil((float) hullBounds.height()) + 4 : 8);
+        int scanX = MathHelper.floor(state.position.x);
+        int scanZ = MathHelper.floor(state.position.z);
 
-        double  lastWaterY = hullBottomWorldY;
-        boolean sawWater   = false;
+        // Scan from well above the hull down to 20 blocks below hull bottom.
+        int startY = MathHelper.floor(state.position.y) + 4;
+        int endY   = startY - 24;
 
-        for (int y = startY; y <= maxScan; y++) {
-            BlockPos pos = new BlockPos(scanX, y, scanZ);
-            if (!world.getFluidState(pos).isEmpty()) {
-                sawWater   = true;
-                lastWaterY = y + 1.0D;
-            } else if (sawWater) {
-                break;
+        for (int y = startY; y >= endY; y--) {
+            FluidState fluid = world.getFluidState(new BlockPos(scanX, y, scanZ));
+            if (!fluid.isEmpty()) {
+                return y + 1.0D;  // top surface of this water block
             }
         }
-        return lastWaterY;
+        return Double.NaN;  // no water found
     }
+
+    /** World Y of the bottom of the hull bounding box. */
+    private double hullBottomWorldY() {
+        double offset = hullBounds != null ? hullBounds.minY() : -0.5D;
+        return state.position.y + offset;
+    }
+
+    // ---- Floor penetration guard ----------------------------------------
+
+    /**
+     * If the hull bottom is inside a solid block, push the position up
+     * until it clears, and zero out downward velocity.
+     * Does NOT bounce — velocity is set to zero to avoid the 1-block
+     * teleport loop.
+     */
+    private Vec3d preventFloorPenetration(Vec3d pos) {
+        if (hullBounds == null) return pos;
+        double minYOffset = hullBounds.minY();
+
+        for (int attempt = 0; attempt < 16; attempt++) {
+            BlockPos check = new BlockPos(
+                MathHelper.floor(pos.x),
+                MathHelper.floor(pos.y + minYOffset),
+                MathHelper.floor(pos.z)
+            );
+            BlockState bs = world.getBlockState(check);
+            if (!bs.isSolidBlock(world, check)) break;
+            // Nudge up by the remaining penetration depth.
+            double blockTop = check.getY() + 1.0D;
+            double penetration = blockTop - (pos.y + minYOffset);
+            pos = pos.add(0.0D, penetration + 0.001D, 0.0D);
+            // Zero vertical velocity — no bounce, no teleport loop.
+            state.velocity = new Vec3d(state.velocity.x, 0.0D, state.velocity.z);
+        }
+        return pos;
+    }
+
+    // ---- Helpers ---------------------------------------------------------
 
     private Vec3d clipVelocity(Vec3d v) {
         double speed = v.length();
         return speed > PhysicsConfig.MAX_VELOCITY
             ? v.normalize().multiply(PhysicsConfig.MAX_VELOCITY)
             : v;
-    }
-
-    private Vec3d handleTerrainCollision(Vec3d newPos) {
-        if (hullBounds == null) return newPos;
-
-        double minYOffset  = hullBounds.minY();
-        double widthRadius = Math.max(hullBounds.widthX(), hullBounds.widthZ()) * 0.5D;
-        double height      = hullBounds.height();
-
-        BlockPos bottomPos = new BlockPos(
-            MathHelper.floor(newPos.x),
-            MathHelper.floor(newPos.y + minYOffset),
-            MathHelper.floor(newPos.z)
-        );
-        BlockState bottomBlock = world.getBlockState(bottomPos);
-        if (!bottomBlock.isSolidBlock(world, bottomPos)) return newPos;
-
-        Box shipBounds = new Box(
-            newPos.x - widthRadius, newPos.y + minYOffset, newPos.z - widthRadius,
-            newPos.x + widthRadius, newPos.y + minYOffset + height, newPos.z + widthRadius
-        );
-
-        for (int i = 0; i < 10; i++) {
-            newPos     = newPos.add(0.0D, 0.25D, 0.0D);
-            shipBounds = shipBounds.offset(0.0D, 0.25D, 0.0D);
-            BlockPos newBottom = new BlockPos(
-                MathHelper.floor(newPos.x),
-                MathHelper.floor(newPos.y + minYOffset),
-                MathHelper.floor(newPos.z)
-            );
-            if (!world.getBlockState(newBottom).isSolidBlock(world, newBottom)) {
-                // Kill downward momentum and absorb the bounce.
-                state.velocity = new Vec3d(
-                    state.velocity.x * (1.0 - PhysicsConfig.FLOOR_BOUNCE_DAMP),
-                    0.0,   // hard-zero Y: no upward rebound from floor
-                    state.velocity.z * (1.0 - PhysicsConfig.FLOOR_BOUNCE_DAMP)
-                );
-                break;
-            }
-        }
-        return newPos;
     }
 
     private boolean isAtRest() {
