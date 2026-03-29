@@ -9,8 +9,10 @@ import net.minecraft.util.Identifier;
 import java.util.UUID;
 
 /**
- * Sent server → client when a ship is destroyed / unloaded.
+ * Sent server -> client when a ship is destroyed / unloaded.
  * Tells the client to evict the ship from ShipTransformCache.
+ *
+ * send() is guarded by canSend() for consistency.
  */
 public final class ShipRemoveS2CPacket {
 
@@ -20,6 +22,7 @@ public final class ShipRemoveS2CPacket {
     private ShipRemoveS2CPacket() {}
 
     public static void send(ServerPlayerEntity player, UUID shipId) {
+        if (!ServerPlayNetworking.canSend(player, ID)) return;
         PacketByteBuf buf = PacketByteBufs.create();
         buf.writeUuid(shipId);
         ServerPlayNetworking.send(player, ID, buf);

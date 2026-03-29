@@ -10,20 +10,23 @@ import net.minecraft.util.math.Vec3d;
 import java.util.UUID;
 
 /**
- * Sent server → client every tick for each active ship.
+ * Sent server -> client every tick for each active ship.
  * Carries the minimal data the client renderer needs to position
  * the ship's block overlay in the overworld.
  *
  * Packet layout (bytes):
- *   UUID  shipId          (16)
- *   double worldOffsetX   (8)
- *   double worldOffsetY   (8)
- *   double worldOffsetZ   (8)
- *   float  yaw            (4)
- *   double velocityX      (8)
- *   double velocityY      (8)
- *   double velocityZ      (8)
- *                       = 68 bytes total
+ *   UUID   shipId          (16)
+ *   double worldOffsetX    (8)
+ *   double worldOffsetY    (8)
+ *   double worldOffsetZ    (8)
+ *   float  yaw             (4)
+ *   double velocityX       (8)
+ *   double velocityY       (8)
+ *   double velocityZ       (8)
+ *                        = 68 bytes total
+ *
+ * send() is guarded by canSend(): tick-rate packets are skipped rather
+ * than dropped by the network layer when the channel is not yet ready.
  */
 public final class ShipTransformSyncS2CPacket {
 
@@ -39,6 +42,8 @@ public final class ShipTransformSyncS2CPacket {
             float yaw,
             Vec3d velocity
     ) {
+        if (!ServerPlayNetworking.canSend(player, ID)) return;
+
         PacketByteBuf buf = PacketByteBufs.create();
         buf.writeUuid(shipId);
         buf.writeDouble(worldOffset.x);

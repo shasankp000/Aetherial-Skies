@@ -12,7 +12,7 @@ import net.shasankp000.Ship.ShipHullData;
 import java.util.UUID;
 
 /**
- * Sent server → client once when a ship is deployed.
+ * Sent server -> client once when a ship is deployed.
  * Carries the full hull data (block list + transform) so the client
  * can populate its local ShipTransformCache and begin rendering.
  *
@@ -23,9 +23,15 @@ import java.util.UUID;
  *   float  yaw
  *   int    blockCount
  *   for each block:
- *     String blockId
- *     double localOffsetX/Y/Z
+ *     String  blockId
+ *     double  localOffsetX/Y/Z
  *     boolean isHelm
+ *
+ * send() is guarded by ServerPlayNetworking.canSend(): if the client has
+ * not yet completed the channel registration handshake the packet is
+ * skipped rather than silently dropped by the network layer.
+ * The JOIN listener in AetherialSkies replays this packet for every
+ * active ship once a player's connection is fully ready.
  */
 public final class ShipDeployS2CPacket {
 
@@ -42,6 +48,11 @@ public final class ShipDeployS2CPacket {
             float yaw,
             ShipHullData hullData
     ) {
+        // Guard: only send if the client has acknowledged this channel.
+        if (!ServerPlayNetworking.canSend(player, ID)) {
+            return;
+        }
+
         PacketByteBuf buf = PacketByteBufs.create();
         buf.writeUuid(shipId);
         buf.writeDouble(structureOrigin.x);

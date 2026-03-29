@@ -4,8 +4,10 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.block.BlockState;
 import net.minecraft.registry.RegistryKey;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import net.shasankp000.Entity.GravityBlockEntity;
@@ -16,8 +18,11 @@ import net.shasankp000.Registry.ModBlocks;
 import net.shasankp000.Registry.ModEntityTypes;
 import net.shasankp000.Registry.ModItems;
 import net.shasankp000.Ship.Command.ShipCommands;
+import net.shasankp000.Ship.Network.ShipDeployS2CPacket;
 import net.shasankp000.Ship.Physics.ShipTransformManager;
+import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
+import net.shasankp000.Ship.Transform.ShipTransform;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,7 +40,6 @@ public class AetherialSkies implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("Initializing Aetherial Skies...");
 
-        // Load Jolt native library FIRST before any other Jolt code runs
         JoltNativeLoader.load();
 
         ModEntityTypes.register();
@@ -50,7 +54,6 @@ public class AetherialSkies implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             ShipStructureManager.getInstance().init(server);
             ShipTransformManager.getInstance().init(server);
-            // Initialise Jolt after the server world is ready
             JoltPhysicsSystem.getInstance().init();
             LOGGER.info("[AetherialSkies] ShipStructureManager + ShipTransformManager + Jolt initialized.");
         });
@@ -59,10 +62,32 @@ public class AetherialSkies implements ModInitializer {
             JoltPhysicsSystem.getInstance().destroy();
         });
 
+        // --- JOIN replay -------------------------------------------------
+        // ServerPlayConnectionEvents.JOIN fires AFTER the channel registration
+        // handshake is complete, so canSend() will return true here.
+        // We replay the full ShipDeployS2CPacket for every ship already active
+        // so the client's ShipTransformCache is populated before the first
+        // render tick. Without this, any ship deployed before the player
+        // joined (including ships from a previous session) would be invisible.
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            ServerPlayerEntity player = handler.getPlayer();
+            for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
+                ShipTransform t = structure.getTransform();
+                LOGGER.info("[AetherialSkies] Replaying ship deploy to {}: ship {}",
+                    player.getNameForScoreboard(),
+                    structure.getShipId().toString().substring(0, 8));
+                ShipDeployS2CPacket.send(
+                    player,
+                    structure.getShipId(),
+                    t.structureOrigin(),
+                    t.worldOffset(),
+                    t.yaw(),
+                    structure.getHullData()
+                );
+            }
+        });
+
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            // ShipTransformManager.tick() internally calls:
-            //   engine.tick() -> updateBodyTransform() -> stepSimulation() -> readBackFromJolt()
-            // Do NOT call stepSimulation() again here.
             ShipTransformManager.getInstance().tick();
 
             Set<BlockPos> toRemove = new HashSet<>();
