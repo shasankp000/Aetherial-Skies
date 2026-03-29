@@ -15,7 +15,6 @@ repositories {
 }
 
 configurations {
-	// Plain (non-mod) configuration that bypasses Fabric Loom remapping.
 	joltLibs
 	compileClasspath.extendsFrom joltLibs
 	runtimeClasspath.extendsFrom joltLibs
@@ -33,16 +32,12 @@ dependencies {
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-	// Jolt-JNI: Windows64 jar contains all Java API classes — used for compilation.
-	// All 4 platform jars are included at runtime so the mod works on any OS.
-	// Resolved from local libs/ directory to bypass Fabric Loom's Maven interception.
-	joltLibs files('libs/jolt-jni-Windows64-3.9.0.jar')   // API + Windows native
-	joltLibs files('libs/jolt-jni-Linux64-3.9.0.jar')     // Linux native
-	joltLibs files('libs/jolt-jni-MacOSX64-3.9.0.jar')    // macOS x64 native
-	joltLibs files('libs/jolt-jni-MacOSX_ARM64-3.9.0.jar') // macOS arm64 native
+	joltLibs files('libs/jolt-jni-Windows64-3.9.0.jar')
+	joltLibs files('libs/jolt-jni-Linux64-3.9.0.jar')
+	joltLibs files('libs/jolt-jni-MacOSX64-3.9.0.jar')
+	joltLibs files('libs/jolt-jni-MacOSX_ARM64-3.9.0.jar')
 }
 
-// Bundle all jolt-jni jars into the final mod jar
 jar {
 	inputs.property "archivesName", project.base.archivesName
 	from("LICENSE") {
@@ -55,6 +50,7 @@ jar {
 		exclude 'META-INF/*.SF'
 		exclude 'META-INF/*.DSA'
 		exclude 'META-INF/*.RSA'
+		duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 	}
 }
 
