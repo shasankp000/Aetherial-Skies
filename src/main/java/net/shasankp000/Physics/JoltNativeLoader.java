@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -16,17 +17,16 @@ import java.util.jar.JarFile;
 /**
  * Loads the Jolt-JNI native library (.dll / .so / .dylib) at runtime.
  *
- * <h3>Strategy (in order)</h3>
+ * <p>Extraction strategy:
  * <ol>
- *   <li><b>System.loadLibrary</b> – works when {@code java.library.path}
- *       already contains the native (production mod jar or explicit JVM arg).</li>
- *   <li><b>Jar-on-disk scan</b> – reads the paths listed in the system
- *       property {@code jolt.libs.path} (set by {@code build.gradle} for dev
- *       runs), opens each JAR file directly, finds the native by filename,
- *       extracts it to a temp directory, and calls {@code System.load}.</li>
- *   <li><b>Classpath resource</b> – last resort; tries {@code /joltjni.dll}
- *       etc. at the classpath root (works when natives are bundled flat into
- *       the production mod jar).</li>
+ *   <li>System.loadLibrary — works if the native is already on java.library.path.</li>
+ *   <li>Jar-on-disk scan — opens each JAR listed in {@code jolt.libs.path}
+ *       (injected by build.gradle), extracts the native to a stable directory
+ *       ({@code ~/.jolt-jni/}), prepends that dir to PATH on Windows so
+ *       side-by-side DLL dependencies (VCRUNTIME etc.) can be found, then
+ *       calls System.load().</li>
+ *   <li>Classpath resource — last resort for the production mod jar where
+ *       natives are bundled flat at the root.</li>
  * </ol>
  */
 public final class JoltNativeLoader {
@@ -34,8 +34,11 @@ public final class JoltNativeLoader {
     private static final Logger LOGGER =
             LoggerFactory.getLogger("AetherialSkies/JoltNativeLoader");
 
-    /** System property injected by build.gradle listing joltLibs jar paths, semicolon-separated. */
     public static final String JOLT_LIBS_PATH_PROP = "jolt.libs.path";
+
+    /** Stable extraction directory: ~/.jolt-jni/ */
+    private static final Path NATIVE_DIR =
+            Paths.get(System.getProperty("user.home"), ".jolt-jni");
 
     private static volatile boolean loaded = false;
 
@@ -45,10 +48,11 @@ public final class JoltNativeLoader {
         if (loaded) return;
 
         String nativeLib = resolveNativeLibName();
-        LOGGER.info("[JoltNativeLoader] Loading native library: {}", nativeLib);
+        LOGGER.info("[JoltNativeLoader] Loading native library: {} (extraction dir: {})",
+                nativeLib, NATIVE_DIR);
 
         // ------------------------------------------------------------------
-        // 1. System.loadLibrary – fast path for production / explicit path.
+        // 1. System.loadLibrary — fast path.
         // ------------------------------------------------------------------
         try {
             System.loadLibrary(stripExtension(nativeLib));
@@ -57,24 +61,41 @@ public final class JoltNativeLoader {
             return;
         } catch (UnsatisfiedLinkError ignored) {}
 
+        // Ensure the stable extraction directory exists.
+        try {
+            Files.createDirectories(NATIVE_DIR);
+        } catch (IOException e) {
+            throw new RuntimeException("[JoltNativeLoader] Cannot create native dir: " + NATIVE_DIR, e);
+        }
+
+        // On Windows, prepend NATIVE_DIR to PATH so the DLL loader can find
+        // any co-located dependencies (VCRUNTIME140.dll, etc.).
+        prependToPath(NATIVE_DIR);
+
         // ------------------------------------------------------------------
-        // 2. Scan the joltLibs jars listed in the 'jolt.libs.path' property.
-        //    build.gradle injects this property for runClient / runServer.
+        // 2. Jar-on-disk scan via jolt.libs.path property.
         // ------------------------------------------------------------------
         String libsPath = System.getProperty(JOLT_LIBS_PATH_PROP);
         if (libsPath != null && !libsPath.isEmpty()) {
-            for (String jarPath : libsPath.split(";")) {
-                jarPath = jarPath.trim();
-                if (jarPath.isEmpty()) continue;
-                Path result = tryExtractFromJar(Paths.get(jarPath), nativeLib);
-                if (result != null) {
+            for (String jarPathStr : libsPath.split(";")) {
+                jarPathStr = jarPathStr.trim();
+                if (jarPathStr.isEmpty()) continue;
+                Path extracted = tryExtractFromJar(Paths.get(jarPathStr), nativeLib);
+                if (extracted != null) {
                     try {
-                        System.load(result.toAbsolutePath().toString());
-                        LOGGER.info("[JoltNativeLoader] Loaded from jar-on-disk: {}", result);
+                        System.load(extracted.toAbsolutePath().toString());
+                        LOGGER.info("[JoltNativeLoader] Loaded from jar: {}", extracted);
                         loaded = true;
                         return;
                     } catch (UnsatisfiedLinkError e) {
-                        LOGGER.warn("[JoltNativeLoader] System.load failed for {}: {}", result, e.getMessage());
+                        // Log full message for diagnosis — this is a real error.
+                        LOGGER.error("[JoltNativeLoader] System.load('{}') failed: {}",
+                                extracted, e.getMessage());
+                        throw new RuntimeException(
+                            "[JoltNativeLoader] System.load failed for '" + extracted +
+                            "'. This usually means a missing DLL dependency on Windows " +
+                            "(e.g. VCRUNTIME140.dll). Make sure the Visual C++ Redistributable " +
+                            "2019+ is installed: https://aka.ms/vs/17/release/vc_redist.x64.exe", e);
                     }
                 }
             }
@@ -85,25 +106,25 @@ public final class JoltNativeLoader {
         // ------------------------------------------------------------------
         try (InputStream in = JoltNativeLoader.class.getResourceAsStream("/" + nativeLib)) {
             if (in != null) {
-                Path tempLib = extractToTemp(in, nativeLib);
-                System.load(tempLib.toAbsolutePath().toString());
-                LOGGER.info("[JoltNativeLoader] Loaded from classpath resource: {}", tempLib);
+                Path dest = NATIVE_DIR.resolve(nativeLib);
+                Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
+                System.load(dest.toAbsolutePath().toString());
+                LOGGER.info("[JoltNativeLoader] Loaded from classpath resource: {}", dest);
                 loaded = true;
                 return;
             }
         } catch (IOException | UnsatisfiedLinkError e) {
-            LOGGER.warn("[JoltNativeLoader] Classpath resource extraction failed: {}", e.getMessage());
+            LOGGER.error("[JoltNativeLoader] Classpath resource load failed: {}", e.getMessage());
         }
 
         // ------------------------------------------------------------------
-        // 4. Give up with a clear message.
+        // 4. Give up.
         // ------------------------------------------------------------------
         throw new IllegalStateException(
-            "[JoltNativeLoader] Could not load native library '" + nativeLib + "'. " +
-            "Checked: System.loadLibrary, jar-on-disk scan (" +
-            JOLT_LIBS_PATH_PROP + "=" + libsPath + "), classpath resource. " +
-            "Ensure jolt-jni-Windows64-3.9.0.jar (or the correct platform jar) " +
-            "is present in libs/ and declared as joltLibs in build.gradle."
+            "[JoltNativeLoader] Could not load '" + nativeLib + "'. " +
+            "Checked: System.loadLibrary, jar-on-disk (" + JOLT_LIBS_PATH_PROP +
+            "=" + libsPath + "), classpath resource. " +
+            "Ensure jolt-jni-Windows64-3.9.0.jar is in libs/."
         );
     }
 
@@ -112,42 +133,63 @@ public final class JoltNativeLoader {
     // -----------------------------------------------------------------------
 
     /**
-     * Opens the given JAR file, finds the first entry whose filename matches
-     * {@code nativeLib} (case-insensitive), extracts it to a temp dir, and
-     * returns the extracted path. Returns null if not found.
+     * Scans {@code jarPath} for an entry whose bare filename equals
+     * {@code nativeLib}, extracts it to {@link #NATIVE_DIR}, and returns
+     * the extracted path. Returns null if not found in this jar.
      */
     private static Path tryExtractFromJar(Path jarPath, String nativeLib) {
-        if (!jarPath.toFile().exists()) return null;
+        if (!jarPath.toFile().exists()) {
+            LOGGER.warn("[JoltNativeLoader] Jar not found on disk: {}", jarPath);
+            return null;
+        }
         try (JarFile jar = new JarFile(jarPath.toFile())) {
             java.util.Enumeration<JarEntry> entries = jar.entries();
             while (entries.hasMoreElements()) {
                 JarEntry entry = entries.nextElement();
                 String entryName = entry.getName();
-                // Match just the filename portion, any subdirectory.
                 String entryFile = entryName.contains("/")
                         ? entryName.substring(entryName.lastIndexOf('/') + 1)
                         : entryName;
                 if (entryFile.equalsIgnoreCase(nativeLib)) {
-                    LOGGER.info("[JoltNativeLoader] Found '{}' at '{}' in {}",
+                    LOGGER.info("[JoltNativeLoader] Found '{}' at '{}' inside {}",
                             nativeLib, entryName, jarPath.getFileName());
+                    Path dest = NATIVE_DIR.resolve(nativeLib);
                     try (InputStream in = jar.getInputStream(entry)) {
-                        return extractToTemp(in, nativeLib);
+                        Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
                     }
+                    LOGGER.info("[JoltNativeLoader] Extracted to: {}", dest);
+                    return dest;
                 }
             }
+            LOGGER.warn("[JoltNativeLoader] '{}' not found inside {}", nativeLib, jarPath.getFileName());
         } catch (IOException e) {
-            LOGGER.warn("[JoltNativeLoader] Could not scan jar {}: {}", jarPath, e.getMessage());
+            LOGGER.error("[JoltNativeLoader] Failed to scan jar {}: {}", jarPath, e.getMessage());
         }
         return null;
     }
 
-    private static Path extractToTemp(InputStream in, String nativeLib) throws IOException {
-        Path tempDir = Files.createTempDirectory("jolt-jni-");
-        tempDir.toFile().deleteOnExit();
-        Path tempLib = tempDir.resolve(nativeLib);
-        Files.copy(in, tempLib, StandardCopyOption.REPLACE_EXISTING);
-        tempLib.toFile().deleteOnExit();
-        return tempLib;
+    /**
+     * Prepends {@code dir} to the JVM's internal usr_paths list so that
+     * System.load can find DLL dependencies placed alongside the native.
+     * This is a best-effort hack; if the reflection fails we log and continue.
+     */
+    private static void prependToPath(Path dir) {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (!os.contains("win")) return; // Only needed on Windows.
+        try {
+            Field usrPathsField = ClassLoader.class.getDeclaredField("usr_paths");
+            usrPathsField.setAccessible(true);
+            String[] current = (String[]) usrPathsField.get(null);
+            String add = dir.toAbsolutePath().toString();
+            for (String p : current) if (p.equals(add)) return; // already present
+            String[] updated = new String[current.length + 1];
+            updated[0] = add;
+            System.arraycopy(current, 0, updated, 1, current.length);
+            usrPathsField.set(null, updated);
+            LOGGER.info("[JoltNativeLoader] Prepended '{}' to JVM usr_paths.", add);
+        } catch (Exception e) {
+            LOGGER.warn("[JoltNativeLoader] Could not prepend to usr_paths (non-fatal): {}", e.getMessage());
+        }
     }
 
     private static String resolveNativeLibName() {
@@ -175,6 +217,6 @@ public final class JoltNativeLoader {
 
     private static UnsupportedOperationException unsupported(String os, String arch) {
         return new UnsupportedOperationException(
-            "[JoltNativeLoader] Unsupported platform: os=" + os + " arch=" + arch);
+                "[JoltNativeLoader] Unsupported platform: os=" + os + " arch=" + arch);
     }
 }
