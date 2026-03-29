@@ -21,24 +21,23 @@ fabricApi {
 }
 
 dependencies {
-    minecraft "net.minecraft:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+	minecraft "net.minecraft:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // Use the Windows64 jar as the primary implementation (it contains the .class files)
-    // We 'include' it so it's bundled in your final mod jar for users.
-    implementation 'com.github.stephengold:jolt-jni-Windows64:3.9.0'
-    include 'com.github.stephengold:jolt-jni-Windows64:3.9.0'
+	// Jolt JNI - JVM API library (class files only, no natives)
+	implementation 'com.github.stephengold:jolt-jni-Windows64:3.9.0'
 
-    // Add other platforms as runtime dependencies and 'include' them for cross-platform support
-    runtimeOnly 'com.github.stephengold:jolt-jni-Linux64:3.9.0'
-    include 'com.github.stephengold:jolt-jni-Linux64:3.9.0'
+	// Jolt JNI - native binaries (classifier 'ReleaseSp' contains the actual .dll/.so/.dylib)
+	runtimeOnly 'com.github.stephengold:jolt-jni-Windows64:3.9.0:ReleaseSp'
+	runtimeOnly 'com.github.stephengold:jolt-jni-Linux64:3.9.0:ReleaseSp'
+	runtimeOnly 'com.github.stephengold:jolt-jni-MacOSX_ARM64:3.9.0:ReleaseSp'
 
-    runtimeOnly 'com.github.stephengold:jolt-jni-MacOSX_ARM64:3.9.0'
-    include 'com.github.stephengold:jolt-jni-MacOSX_ARM64:3.9.0'
+	// JSnapLoader - the officially recommended native library loader for jolt-jni
+	implementation 'io.github.electrostat-lab:snaploader:1.1.1-stable'
+	runtimeOnly 'com.github.oshi:oshi-core:6.8.3'
 }
-
 
 jar {
 	inputs.property "archivesName", project.base.archivesName
