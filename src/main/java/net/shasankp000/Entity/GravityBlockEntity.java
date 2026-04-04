@@ -74,19 +74,11 @@ public class GravityBlockEntity extends Entity {
     private int landingTimer = 0;
     private int settleTicks = 0;
 
-    // Separate settle counter for the water dead-band path.
-    private int waterSettleTicks = 0;
-
     private static final int REQUIRED_SLEEP_TICKS = 14;
     private static final double SLEEP_LINEAR_THRESHOLD = 0.0009D;
     private static final double WAKE_LINEAR_THRESHOLD = 0.01D;
     private static final float SLEEP_ANGULAR_THRESHOLD = 0.08f;
     private static final float WAKE_ANGULAR_THRESHOLD = 0.18f;
-
-    // Water dead-band: if |vel.y| is below this while floating, snap it to zero.
-    private static final double WATER_SLEEP_VY_THRESHOLD = 0.0008D;
-    // Require this many consecutive quiet ticks before snapping, to avoid locking during wave hits.
-    private static final int WATER_REQUIRED_SLEEP_TICKS = 10;
 
     // In GravityBlockEntity
     private float miningProgress = 0.0f;
@@ -522,28 +514,7 @@ public class GravityBlockEntity extends Entity {
         double linearMagnitude = velocity.lengthSquared();
         float angularMagnitude = Math.abs(this.angularVelocity) + Math.abs(this.pitchAngularVelocity) + Math.abs(this.rollAngularVelocity);
         boolean grounded = this.isOnGround() || landingTimer > 0;
-        boolean inFluid = this.isTouchingWater() || this.isInLava();
 
-        // --- Water dead-band: snap residual vertical creep to zero when floating is settled ---
-        if (inFluid && !grounded) {
-            if (Math.abs(velocity.y) < WATER_SLEEP_VY_THRESHOLD && velocity.horizontalLength() < WAKE_LINEAR_THRESHOLD) {
-                waterSettleTicks++;
-                if (waterSettleTicks >= WATER_REQUIRED_SLEEP_TICKS) {
-                    // Zero out only vertical — leave horizontal free for wave drift.
-                    this.setVelocity(velocity.x, 0.0D, velocity.z);
-                }
-            } else {
-                // Wake: any significant motion resets the counter so wave hits re-engage normally.
-                waterSettleTicks = 0;
-            }
-            // Ground sleep path does not apply while floating — return early.
-            return;
-        }
-
-        // Reset water counter when leaving fluid.
-        waterSettleTicks = 0;
-
-        // --- Standard ground sleep path ---
         if (grounded && linearMagnitude < SLEEP_LINEAR_THRESHOLD && angularMagnitude < SLEEP_ANGULAR_THRESHOLD) {
             settleTicks++;
             if (settleTicks >= REQUIRED_SLEEP_TICKS) {
