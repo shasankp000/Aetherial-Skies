@@ -58,7 +58,14 @@ public final class JoltPhysicsSystem {
     private BodyInterface                      bodyInterface;
 
     /** Maps ship UUID → Jolt BodyID value (int). */
-    private final Map<UUID, Integer> shipBodyIds = new HashMap<>();
+    private final Map<UUID, Integer>              shipBodyIds    = new HashMap<>();
+    /**
+     * Hull bounds cached at registration time.
+     * computeBounds() iterates every block in the hull — calling it every
+     * tick (inside updateBodyTransform) was the primary cause of server lag.
+     * Bounds never change for a compiled hull, so we compute once and reuse.
+     */
+    private final Map<UUID, ShipHullData.HullBounds> boundsCache = new HashMap<>();
 
     private volatile boolean initialised = false;
 
@@ -117,21 +124,19 @@ public final class JoltPhysicsSystem {
      * The box dimensions are derived from the hull AABB.
      * Must be called on the server thread after init().
      */
-    public synchronized void registerShipBody(UUID shipId, ShipHullData hullData, Vec3d initialPos, float initialYaw) {
+    public synchronized void registerShipBody(UUID shipId, ShipHullData hullData,
+                                               Vec3d initialPos, float initialYaw) {
         if (!initialised) return;
         if (shipBodyIds.containsKey(shipId)) return; // already registered
 
+        // Compute and cache bounds ONCE per ship registration.
         ShipHullData.HullBounds bounds = hullData.computeBounds();
+        boundsCache.put(shipId, bounds);
 
         // Half-extents for the box shape (Jolt uses half-extents).
-        float hx = (float) (bounds.widthX() / 2.0);
-        float hy = (float) (bounds.height()  / 2.0);
-        float hz = (float) (bounds.widthZ()  / 2.0);
-
-        // Jolt minimum half-extent is 0.05 to avoid degenerate shapes.
-        hx = Math.max(hx, 0.05f);
-        hy = Math.max(hy, 0.05f);
-        hz = Math.max(hz, 0.05f);
+        float hx = Math.max((float)(bounds.widthX() / 2.0), 0.05f);
+        float hy = Math.max((float)(bounds.height()  / 2.0), 0.05f);
+        float hz = Math.max((float)(bounds.widthZ()  / 2.0), 0.05f);
 
         BoxShapeSettings shapeSettings = new BoxShapeSettings(hx, hy, hz);
         ShapeResult shapeResult = shapeSettings.create();
@@ -140,15 +145,12 @@ public final class JoltPhysicsSystem {
                     shipId, shapeResult.getError());
             return;
         }
-        // ShapeResult.get() returns ShapeRefC in jolt-jni 3.9.0
         ShapeRefC shape = shapeResult.get();
 
-        // Centre of the box in world space = ship position + hull centre offset.
-        float cx = (float) (initialPos.x + (bounds.minX() + bounds.maxX()) / 2.0);
-        float cy = (float) (initialPos.y + (bounds.minY() + bounds.maxY()) / 2.0);
-        float cz = (float) (initialPos.z + (bounds.minZ() + bounds.maxZ()) / 2.0);
+        float cx = (float)(initialPos.x + (bounds.minX() + bounds.maxX()) / 2.0);
+        float cy = (float)(initialPos.y + (bounds.minY() + bounds.maxY()) / 2.0);
+        float cz = (float)(initialPos.z + (bounds.minZ() + bounds.maxZ()) / 2.0);
 
-        // Convert yaw (degrees, Y-axis) to a Jolt quaternion.
         float halfYaw = (float) Math.toRadians(initialYaw / 2.0);
         float qw = (float) Math.cos(halfYaw);
         float qy = (float) Math.sin(halfYaw);
@@ -167,7 +169,6 @@ public final class JoltPhysicsSystem {
             return;
         }
 
-        // Body.getId() returns a primitive int in jolt-jni 3.9.0
         int bodyId = body.getId();
         bodyInterface.addBody(bodyId, EActivation.Activate);
         shipBodyIds.put(shipId, bodyId);
@@ -177,7 +178,9 @@ public final class JoltPhysicsSystem {
 
     /**
      * Moves the Jolt kinematic body to match the position/yaw computed by
-     * ShipPhysicsEngine this tick. Call this BEFORE stepSimulation().
+     * ShipPhysicsEngine this tick.
+     *
+     * Uses the cached HullBounds — no per-tick computeBounds() call.
      */
     public void updateBodyTransform(UUID shipId, Vec3d pos, float yawDegrees,
                                     ShipHullData hullData) {
@@ -185,16 +188,18 @@ public final class JoltPhysicsSystem {
         Integer rawId = shipBodyIds.get(shipId);
         if (rawId == null) return;
 
-        ShipHullData.HullBounds bounds = hullData.computeBounds();
-        float cx = (float) (pos.x + (bounds.minX() + bounds.maxX()) / 2.0);
-        float cy = (float) (pos.y + (bounds.minY() + bounds.maxY()) / 2.0);
-        float cz = (float) (pos.z + (bounds.minZ() + bounds.maxZ()) / 2.0);
+        // Use cached bounds; fall back to computing (and caching) if missing.
+        ShipHullData.HullBounds bounds = boundsCache.computeIfAbsent(
+            shipId, id -> hullData.computeBounds());
+
+        float cx = (float)(pos.x + (bounds.minX() + bounds.maxX()) / 2.0);
+        float cy = (float)(pos.y + (bounds.minY() + bounds.maxY()) / 2.0);
+        float cz = (float)(pos.z + (bounds.minZ() + bounds.maxZ()) / 2.0);
 
         float halfYaw = (float) Math.toRadians(yawDegrees / 2.0);
         float qw = (float) Math.cos(halfYaw);
         float qy = (float) Math.sin(halfYaw);
 
-        // BodyInterface.setPositionAndRotation takes a plain int bodyId
         bodyInterface.setPositionAndRotation(
             rawId,
             new RVec3(cx, cy, cz),
@@ -204,20 +209,18 @@ public final class JoltPhysicsSystem {
     }
 
     /**
-     * Reads the current Jolt body centre-of-mass position back, converts it
-     * to the ship's worldOffset (pivot point), and returns it.
-     * Returns the fallback position if the body is not registered.
+     * Reads the current Jolt body centre-of-mass position back and returns
+     * the ship's worldOffset (pivot point).
      */
     public Vec3d getBodyPosition(UUID shipId, ShipHullData hullData, Vec3d fallback) {
         if (!initialised) return fallback;
         Integer rawId = shipBodyIds.get(shipId);
         if (rawId == null) return fallback;
 
-        ShipHullData.HullBounds bounds = hullData.computeBounds();
-        // BodyInterface.getPosition takes a plain int bodyId
-        RVec3 centre = bodyInterface.getPosition(rawId);
+        ShipHullData.HullBounds bounds = boundsCache.computeIfAbsent(
+            shipId, id -> hullData.computeBounds());
 
-        // Reverse the centre-offset to get the ship pivot position.
+        RVec3 centre = bodyInterface.getPosition(rawId);
         double px = centre.xx() - (bounds.minX() + bounds.maxX()) / 2.0;
         double py = centre.yy() - (bounds.minY() + bounds.maxY()) / 2.0;
         double pz = centre.zz() - (bounds.minZ() + bounds.maxZ()) / 2.0;
@@ -230,9 +233,8 @@ public final class JoltPhysicsSystem {
     public synchronized void removeShipBody(UUID shipId) {
         if (!initialised) return;
         Integer rawId = shipBodyIds.remove(shipId);
+        boundsCache.remove(shipId);
         if (rawId == null) return;
-
-        // BodyInterface.removeBody / destroyBody take a plain int bodyId
         bodyInterface.removeBody(rawId);
         bodyInterface.destroyBody(rawId);
         LOGGER.info("[JoltPhysicsSystem] Removed body for ship {}", shipId);
@@ -259,12 +261,12 @@ public final class JoltPhysicsSystem {
         if (!initialised) return;
         LOGGER.info("[JoltPhysicsSystem] Shutting down Jolt Physics...");
 
-        // Remove all ship bodies before tearing down the system.
         for (Integer rawId : shipBodyIds.values()) {
             bodyInterface.removeBody(rawId);
             bodyInterface.destroyBody(rawId);
         }
         shipBodyIds.clear();
+        boundsCache.clear();
 
         Jolt.unregisterTypes();
         Jolt.destroyFactory();
