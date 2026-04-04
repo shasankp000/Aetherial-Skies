@@ -25,9 +25,13 @@ public final class ShipPilotManager {
     private ShipPilotManager() {}
     public static ShipPilotManager getInstance() { return INSTANCE; }
 
-    // How far (in blocks) a helm block can be from a ship's world-offset
-    // and still be considered "belonging" to that ship.
-    private static final double HELM_SNAP_RANGE = 64.0;
+    /**
+     * Maximum distance (blocks) between the clicked BlockPos centre and a
+     * ship's projected helm world-position for the helm to be considered a
+     * match.  3 blocks is generous enough to account for sub-block offsets
+     * while still being unambiguous when ships are near each other.
+     */
+    private static final double HELM_MATCH_RADIUS = 3.0;
 
     /** Map: shipId -> piloting player UUID */
     private final Map<UUID, UUID> shipToPilot = new ConcurrentHashMap<>();
@@ -41,14 +45,32 @@ public final class ShipPilotManager {
     // ---- Helpers ---------------------------------------------------------
 
     /**
-     * Find the ship whose world-offset is nearest to the centre of the given
-     * BlockPos, within HELM_SNAP_RANGE blocks.  This is a stand-in for a
-     * true "block belongs to ship" lookup that we can add later once the
-     * storage → world projection is queryable.
+     * Find the ship whose projected helm world-position is closest to the
+     * centre of {@code helmPos}, within {@link #HELM_MATCH_RADIUS} blocks.
+     *
+     * <p>This is correct because {@link net.shasankp000.Ship.Structure.ShipStructure#getHelmWorldPos()}
+     * returns the helm's overworld position as computed from the ship's
+     * current transform — exactly the position the player right-clicked.
      */
     private ShipStructure findShipForHelm(BlockPos helmPos) {
-        Vec3d centre = Vec3d.ofCenter(helmPos);
-        return ShipStructureManager.getInstance().findNearest(centre, HELM_SNAP_RANGE);
+        Vec3d clicked = Vec3d.ofCenter(helmPos);
+        double bestDist2 = HELM_MATCH_RADIUS * HELM_MATCH_RADIUS;
+        ShipStructure best = null;
+
+        for (ShipStructure ship : ShipStructureManager.getInstance().getAllShips()) {
+            double d2 = ship.getHelmWorldPos().squaredDistanceTo(clicked);
+            if (d2 < bestDist2) {
+                bestDist2 = d2;
+                best = ship;
+            }
+        }
+
+        if (best == null) {
+            AetherialSkies.LOGGER.warn(
+                "[ShipPilotManager] No ship helm found near block {} (search radius={} blocks)",
+                helmPos, HELM_MATCH_RADIUS);
+        }
+        return best;
     }
 
     // ---- Entry / exit ----------------------------------------------------
@@ -72,10 +94,7 @@ public final class ShipPilotManager {
 
         // Find which ship owns this helm block.
         ShipStructure ship = findShipForHelm(helmPos);
-        if (ship == null) {
-            AetherialSkies.LOGGER.warn("[ShipPilotManager] No ship found near helm at {}", helmPos);
-            return false;
-        }
+        if (ship == null) return false;
 
         // Check nobody else is already piloting this ship.
         if (shipToPilot.containsKey(ship.getShipId())) {

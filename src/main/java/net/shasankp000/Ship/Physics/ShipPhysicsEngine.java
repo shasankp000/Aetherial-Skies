@@ -79,27 +79,18 @@ public class ShipPhysicsEngine {
     }
 
     public void tick() {
-        String sid = shipId.toString().substring(0, 8);
-        int t = tickCount++;
+        tickCount++;
 
         refreshWaterSurface();
 
         double hullBottomY = hullBottomWorldY();
         inWater = !Double.isNaN(cachedWaterSurfaceY) && hullBottomY <= cachedWaterSurfaceY;
 
-        AetherialSkies.LOGGER.info(
-            "[PhysTrace t={}] ship={} ENTRY pos.y={} vel.y={} waterY={} hullBottomY={} inWater={}",
-            t, sid,
-            String.format("%.6f", state.position.y),
-            String.format("%.6f", state.velocity.y),
-            Double.isNaN(cachedWaterSurfaceY) ? "NaN" : String.format("%.6f", cachedWaterSurfaceY),
-            String.format("%.6f", hullBottomY),
-            inWater);
-
         if (inWater != wasInWater) {
             AetherialSkies.LOGGER.info(
                 "[ShipPhysicsEngine] Ship {} {} water at y={}",
-                sid, inWater ? "entered" : "left",
+                shipId.toString().substring(0, 8),
+                inWater ? "entered" : "left",
                 String.format("%.2f", state.position.y));
             wasInWater = inWater;
         }
@@ -112,27 +103,13 @@ public class ShipPhysicsEngine {
 
             double rawABuoy = PhysicsConfig.BUOY_P * error
                             - PhysicsConfig.BUOY_D * state.velocity.y;
-            double a_buoy   = rawABuoy;
-
-            double maxABuoy = PhysicsConfig.GRAVITY * 3.0;
-            boolean wasClamped = Math.abs(a_buoy) > maxABuoy;
-            a_buoy = MathHelper.clamp(a_buoy, -maxABuoy, maxABuoy);
+            double a_buoy   = MathHelper.clamp(rawABuoy,
+                                               -PhysicsConfig.GRAVITY * 3.0,
+                                                PhysicsConfig.GRAVITY * 3.0);
             ay += a_buoy;
 
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} PD targetY={} error={} rawABuoy={} a_buoy={} clamped={} ay={}",
-                t, sid,
-                String.format("%.6f", targetY),
-                String.format("%.6f", error),
-                String.format("%.6f", rawABuoy),
-                String.format("%.6f", a_buoy),
-                wasClamped,
-                String.format("%.6f", ay));
-
             // ---- 2. Horizontal: propulsion -----------------------------------
-            // Apply thrust along the ship's current yaw heading.
-            // yaw=0 → facing south (+Z), yaw=90 → facing west (-X)
-            // Minecraft yaw convention: 0=south, 90=west, 180=north, 270=east.
+            // yaw=0 → facing south (+Z), yaw=90 → west (-X)
             double yawRad = Math.toRadians(state.yaw);
             double fwdX   = -MathHelper.sin((float) yawRad);
             double fwdZ   =  MathHelper.cos((float) yawRad);
@@ -141,59 +118,28 @@ public class ShipPhysicsEngine {
             double az = fwdZ * steerInput.forward() * PhysicsConfig.THRUST_ACCEL;
 
             // ---- 3. Yaw: rotation -------------------------------------------
-            // Positive turn = D = clockwise = increasing yaw.
             float newYaw = state.yaw + (float)(steerInput.turn() * PhysicsConfig.TURN_RATE_DEG);
-            // Normalise to [0, 360)
             newYaw = ((newYaw % 360f) + 360f) % 360f;
             state.yaw = newYaw;
 
             // ---- 4. Integrate velocities ------------------------------------
             double totalDrag = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG + PhysicsConfig.HORIZ_DRAG;
-            double newVy = (state.velocity.y + ay) * (1.0 - (PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG));
-            double newVx = (state.velocity.x + ax) * (1.0 - totalDrag);
-            double newVz = (state.velocity.z + az) * (1.0 - totalDrag);
+            double newVy = (state.velocity.y + ay)  * (1.0 - (PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG));
+            double newVx = (state.velocity.x + ax)  * (1.0 - totalDrag);
+            double newVz = (state.velocity.z + az)  * (1.0 - totalDrag);
 
             state.velocity = clipVelocity(new Vec3d(newVx, newVy, newVz));
             state.position = state.position.add(state.velocity);
 
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} AFTER_STEER fwd={} turn={} yaw={} newVx={} newVz={} pos.y={}",
-                t, sid,
-                steerInput.forward(), steerInput.turn(),
-                String.format("%.2f", state.yaw),
-                String.format("%.6f", state.velocity.x),
-                String.format("%.6f", state.velocity.z),
-                String.format("%.6f", state.position.y));
-
             if (isAtRest()) {
                 state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
-                AetherialSkies.LOGGER.info("[PhysTrace t={}] ship={} AT_REST damping applied", t, sid);
             }
 
         } else {
-            // On land: zero velocity, floor guard only.
+            // On land / air: zero velocity, floor guard only.
             state.velocity = Vec3d.ZERO;
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} LAND_MODE vel zeroed pos.y unchanged={}",
-                t, sid, String.format("%.6f", state.position.y));
-
-            double preFloorY = state.position.y;
             state.position = preventFloorPenetration(state.position);
-            if (state.position.y != preFloorY) {
-                AetherialSkies.LOGGER.info(
-                    "[PhysTrace t={}] ship={} FLOOR_PUSH preY={} postY={} delta={}",
-                    t, sid,
-                    String.format("%.6f", preFloorY),
-                    String.format("%.6f", state.position.y),
-                    String.format("%.6f", state.position.y - preFloorY));
-            }
         }
-
-        AetherialSkies.LOGGER.info(
-            "[PhysTrace t={}] ship={} EXIT pos.y={} vel.y={}",
-            t, sid,
-            String.format("%.6f", state.position.y),
-            String.format("%.6f", state.velocity.y));
 
         if (hullData != null) {
             JoltPhysicsSystem.getInstance().updateBodyTransform(
@@ -203,15 +149,8 @@ public class ShipPhysicsEngine {
 
     public void readBackFromJolt() {
         if (hullData == null) return;
-        Vec3d joltPos = JoltPhysicsSystem.getInstance()
+        state.position = JoltPhysicsSystem.getInstance()
                 .getBodyPosition(shipId, hullData, state.position);
-        AetherialSkies.LOGGER.info(
-            "[PhysTrace] ship={} JOLT_READBACK before={} after={} delta={}",
-            shipId.toString().substring(0, 8),
-            String.format("%.6f", state.position.y),
-            String.format("%.6f", joltPos.y),
-            String.format("%.6f", joltPos.y - state.position.y));
-        state.position = joltPos;
     }
 
     // ---- Water surface ---------------------------------------------------
@@ -241,14 +180,8 @@ public class ShipPhysicsEngine {
                     else break;
                 }
                 if (consecutive >= MIN_OPEN_WATER_DEPTH) {
-                    AetherialSkies.LOGGER.info(
-                        "[PhysTrace] ship={} WATER_SCAN found surface y={} (consecutive={})",
-                        shipId.toString().substring(0, 8), y + 1.0D, consecutive);
                     return y + 1.0D;
                 }
-                AetherialSkies.LOGGER.info(
-                    "[PhysTrace] ship={} WATER_SCAN rejected y={} (consecutive={} < MIN={})",
-                    shipId.toString().substring(0, 8), y + 1.0D, consecutive, MIN_OPEN_WATER_DEPTH);
             }
         }
         return Double.NaN;
@@ -275,28 +208,13 @@ public class ShipPhysicsEngine {
                 MathHelper.floor(pos.z)
             );
             BlockState bs = world.getBlockState(check);
-            boolean solid = bs.isSolidBlock(world, check);
-
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace] ship={} FLOOR_CHECK attempt={} checkPos={} block={} solid={}",
-                shipId.toString().substring(0, 8),
-                attempt, check, bs.getBlock(), solid);
-
-            if (!solid) break;
+            if (!bs.isSolidBlock(world, check)) break;
 
             double blockTop    = check.getY() + 1.0D;
             double penetration = blockTop - (pos.y + minYOffset);
             double push        = Math.min(penetration + 0.001D,
                                          MAX_PUSH_PER_TICK - totalPushed);
             if (push <= 0.0D) break;
-
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace] ship={} FLOOR_PUSH_ITER attempt={} penetration={} push={} totalPushed={}",
-                shipId.toString().substring(0, 8),
-                attempt,
-                String.format("%.6f", penetration),
-                String.format("%.6f", push),
-                String.format("%.6f", totalPushed + push));
 
             pos         = pos.add(0.0D, push, 0.0D);
             totalPushed += push;
