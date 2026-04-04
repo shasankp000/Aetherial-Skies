@@ -106,8 +106,9 @@ public class ShipPhysicsEngine {
             // FIX: divide by hull mass so acceleration = force / mass.
             // Without this, a_buoy scales with mass and causes a runaway
             // upward spike on large ships or on the first tick after spawn.
+            // ShipHullData is a record — the accessor is mass(), not totalMass().
             // Default to 1.0 when hullData is not yet set (massless probe).
-            double totalMass = (hullData != null) ? Math.max(1.0, hullData.totalMass()) : 1.0;
+            double totalMass = (hullData != null) ? Math.max(1.0, hullData.mass()) : 1.0;
             double rawABuoy  = PhysicsConfig.BUOY_P * error
                              - PhysicsConfig.BUOY_D * state.velocity.y;
             double a_buoy    = rawABuoy / totalMass;
