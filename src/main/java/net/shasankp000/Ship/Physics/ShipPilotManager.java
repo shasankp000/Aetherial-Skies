@@ -2,6 +2,7 @@ package net.shasankp000.Ship.Physics;
 
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import net.shasankp000.AetherialSkies;
 import net.shasankp000.Ship.Network.ShipPilotEnteredS2CPacket;
 import net.shasankp000.Ship.Network.ShipPilotExitedS2CPacket;
@@ -24,6 +25,10 @@ public final class ShipPilotManager {
     private ShipPilotManager() {}
     public static ShipPilotManager getInstance() { return INSTANCE; }
 
+    // How far (in blocks) a helm block can be from a ship's world-offset
+    // and still be considered "belonging" to that ship.
+    private static final double HELM_SNAP_RANGE = 64.0;
+
     /** Map: shipId -> piloting player UUID */
     private final Map<UUID, UUID> shipToPilot = new ConcurrentHashMap<>();
 
@@ -32,6 +37,19 @@ public final class ShipPilotManager {
 
     /** Map: shipId -> current steer input (updated each tick from C2S packet) */
     private final Map<UUID, ShipSteerInput> steerInputs = new ConcurrentHashMap<>();
+
+    // ---- Helpers ---------------------------------------------------------
+
+    /**
+     * Find the ship whose world-offset is nearest to the centre of the given
+     * BlockPos, within HELM_SNAP_RANGE blocks.  This is a stand-in for a
+     * true "block belongs to ship" lookup that we can add later once the
+     * storage → world projection is queryable.
+     */
+    private ShipStructure findShipForHelm(BlockPos helmPos) {
+        Vec3d centre = Vec3d.ofCenter(helmPos);
+        return ShipStructureManager.getInstance().findNearest(centre, HELM_SNAP_RANGE);
+    }
 
     // ---- Entry / exit ----------------------------------------------------
 
@@ -45,17 +63,17 @@ public final class ShipPilotManager {
 
         // If already piloting something, exit first.
         if (pilotToShip.containsKey(playerId)) {
-            UUID existingShip = pilotToShip.get(playerId);
+            UUID existingShipId = pilotToShip.get(playerId);
             exitPilot(player);
-            // If they clicked the helm of the same ship they were already piloting, just exit.
-            ShipStructure existing = ShipStructureManager.getInstance().getShipAt(helmPos);
-            if (existing != null && existing.getShipId().equals(existingShip)) return false;
+            // If they clicked the helm of the same ship they were piloting, just exit.
+            ShipStructure existing = findShipForHelm(helmPos);
+            if (existing != null && existing.getShipId().equals(existingShipId)) return false;
         }
 
         // Find which ship owns this helm block.
-        ShipStructure ship = ShipStructureManager.getInstance().getShipAt(helmPos);
+        ShipStructure ship = findShipForHelm(helmPos);
         if (ship == null) {
-            AetherialSkies.LOGGER.warn("[ShipPilotManager] Helm at {} belongs to no ship", helmPos);
+            AetherialSkies.LOGGER.warn("[ShipPilotManager] No ship found near helm at {}", helmPos);
             return false;
         }
 
