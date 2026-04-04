@@ -103,15 +103,14 @@ public class ShipPhysicsEngine {
             double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
             double error   = targetY - hullBottomY;
 
-            // FIX: divide by hull mass so acceleration = force / mass.
-            // Without this, a_buoy scales with mass and causes a runaway
-            // upward spike on large ships or on the first tick after spawn.
-            // ShipHullData is a record — the accessor is mass(), not totalMass().
-            // Default to 1.0 when hullData is not yet set (massless probe).
-            double totalMass = (hullData != null) ? Math.max(1.0, hullData.mass()) : 1.0;
-            double rawABuoy  = PhysicsConfig.BUOY_P * error
-                             - PhysicsConfig.BUOY_D * state.velocity.y;
-            double a_buoy    = rawABuoy / totalMass;
+            // BUOY_P and BUOY_D are acceleration gains (blocks/tick² per block),
+            // exactly like GRAVITY — no mass division needed or wanted.
+            // Dividing by mass was the previous bug: with mass=76 the buoyancy
+            // acceleration shrank to ~0.003/tick², only 8% of GRAVITY, so the
+            // ship always sank.
+            double rawABuoy = PhysicsConfig.BUOY_P * error
+                            - PhysicsConfig.BUOY_D * state.velocity.y;
+            double a_buoy   = rawABuoy;   // acceleration, not force
 
             // Clamp to ±3g so a misconfigured gain or a huge initial error
             // cannot produce a single-tick velocity spike beyond terminal speed.
@@ -122,12 +121,11 @@ public class ShipPhysicsEngine {
             ay += a_buoy;
 
             AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} PD targetY={} error={} rawABuoy={} mass={} a_buoy={} clamped={} ay={}",
+                "[PhysTrace t={}] ship={} PD targetY={} error={} rawABuoy={} a_buoy={} clamped={} ay={}",
                 t, sid,
                 String.format("%.6f", targetY),
                 String.format("%.6f", error),
                 String.format("%.6f", rawABuoy),
-                String.format("%.3f", totalMass),
                 String.format("%.6f", a_buoy),
                 wasClamped,
                 String.format("%.6f", ay));
@@ -151,10 +149,8 @@ public class ShipPhysicsEngine {
                 AetherialSkies.LOGGER.info("[PhysTrace t={}] ship={} AT_REST damping applied", t, sid);
             }
 
-            // ── FIX 1: The PD controller owns vertical position in water.
-            //    The floor-penetration guard must NOT run while inWater=true;
-            //    doing so causes a +1 block/tick runaway when the ocean floor
-            //    is stone directly below the ship's pivot XZ.
+            // The PD controller owns vertical position in water.
+            // The floor-penetration guard must NOT run while inWater=true.
             AetherialSkies.LOGGER.info(
                 "[PhysTrace t={}] ship={} FLOOR_GUARD skipped (inWater=true)",
                 t, sid);
@@ -219,13 +215,6 @@ public class ShipPhysicsEngine {
      * first fluid block.  To avoid mistaking a single waterlogged block in
      * stone for open water, we require at least {@link #MIN_OPEN_WATER_DEPTH}
      * consecutive fluid blocks below the candidate surface.
-     *
-     * <p>FIX 2: The previous implementation accepted any solitary fluid block
-     * (e.g. a waterlogged crack at the ocean floor) as the surface.  This
-     * caused the ship's waterY to resolve to y=63 even when the entire column
-     * at the pivot XZ was stone, making the ship think it was in water, then
-     * immediately "not in water" after the first floor push, resulting in an
-     * infinite +1 block/tick climb.
      */
     private double findWaterSurfaceY() {
         int scanX  = MathHelper.floor(state.position.x);
@@ -236,8 +225,6 @@ public class ShipPhysicsEngine {
         for (int y = startY; y >= endY; y--) {
             FluidState fluid = world.getFluidState(new BlockPos(scanX, y, scanZ));
             if (!fluid.isEmpty()) {
-                // Confirm open water: require MIN_OPEN_WATER_DEPTH consecutive
-                // fluid blocks below (inclusive of the one we just found).
                 int consecutive = 0;
                 for (int dy = 0; dy < MIN_OPEN_WATER_DEPTH; dy++) {
                     FluidState below = world.getFluidState(new BlockPos(scanX, y - dy, scanZ));
