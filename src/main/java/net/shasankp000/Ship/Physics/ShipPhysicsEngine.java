@@ -20,27 +20,19 @@ public class ShipPhysicsEngine {
     private final World world;
     private final UUID shipId;
 
+    // Cached once via setHullBounds / setHullData — never recomputed per tick.
     private ShipHullData.HullBounds hullBounds = null;
     private ShipHullData hullData   = null;
 
     private double cachedWaterSurfaceY    = Double.NaN;
     private int    waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 3;
-
-    /**
-     * Minimum number of consecutive fluid blocks that must be present in a
-     * column (scanning downward from the candidate surface) to qualify as open
-     * water.
-     */
     private static final int MIN_OPEN_WATER_DEPTH = 2;
 
     private boolean inWater    = false;
     private boolean wasInWater = false;
 
-    /** Current steering input, set by ShipTransformManager before each tick. */
     private ShipSteerInput steerInput = ShipSteerInput.NONE;
-
-    private int tickCount = 0;
 
     public ShipPhysicsEngine(UUID shipId, ShipPhysicsState state, World world) {
         this.shipId = shipId;
@@ -60,12 +52,13 @@ public class ShipPhysicsEngine {
         this.waterSurfaceCacheTicks = 0;
     }
 
-    /** Called by ShipTransformManager before tick() to inject this tick's input. */
     public void setSteerInput(ShipSteerInput input) {
         this.steerInput = (input != null) ? input : ShipSteerInput.NONE;
     }
 
     public void syncFrom(ShipStructure structure) {
+        // Use pre-computed cached bounds from ShipStructure.
+        setHullBounds(structure.getCachedBounds());
         ShipTransform t = structure.getTransform();
         state.position = t.worldOffset();
         state.velocity = t.velocity();
@@ -79,8 +72,6 @@ public class ShipPhysicsEngine {
     }
 
     public void tick() {
-        tickCount++;
-
         refreshWaterSurface();
 
         double hullBottomY = hullBottomWorldY();
@@ -96,33 +87,24 @@ public class ShipPhysicsEngine {
         }
 
         if (inWater) {
-            // ---- 1. Vertical: buoyancy PD controller -------------------------
             double ay      = -PhysicsConfig.GRAVITY;
             double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
             double error   = targetY - hullBottomY;
 
-            double rawABuoy = PhysicsConfig.BUOY_P * error
-                            - PhysicsConfig.BUOY_D * state.velocity.y;
-            double a_buoy   = MathHelper.clamp(rawABuoy,
-                                               -PhysicsConfig.GRAVITY * 3.0,
-                                                PhysicsConfig.GRAVITY * 3.0);
+            double a_buoy = MathHelper.clamp(
+                PhysicsConfig.BUOY_P * error - PhysicsConfig.BUOY_D * state.velocity.y,
+                -PhysicsConfig.GRAVITY * 3.0, PhysicsConfig.GRAVITY * 3.0);
             ay += a_buoy;
 
-            // ---- 2. Horizontal: propulsion -----------------------------------
-            // yaw=0 → facing south (+Z), yaw=90 → west (-X)
             double yawRad = Math.toRadians(state.yaw);
             double fwdX   = -MathHelper.sin((float) yawRad);
             double fwdZ   =  MathHelper.cos((float) yawRad);
-
             double ax = fwdX * steerInput.forward() * PhysicsConfig.THRUST_ACCEL;
             double az = fwdZ * steerInput.forward() * PhysicsConfig.THRUST_ACCEL;
 
-            // ---- 3. Yaw: rotation -------------------------------------------
             float newYaw = state.yaw + (float)(steerInput.turn() * PhysicsConfig.TURN_RATE_DEG);
-            newYaw = ((newYaw % 360f) + 360f) % 360f;
-            state.yaw = newYaw;
+            state.yaw = ((newYaw % 360f) + 360f) % 360f;
 
-            // ---- 4. Integrate velocities ------------------------------------
             double totalDrag = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG + PhysicsConfig.HORIZ_DRAG;
             double newVy = (state.velocity.y + ay)  * (1.0 - (PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG));
             double newVx = (state.velocity.x + ax)  * (1.0 - totalDrag);
@@ -136,7 +118,6 @@ public class ShipPhysicsEngine {
             }
 
         } else {
-            // On land / air: zero velocity, floor guard only.
             state.velocity = Vec3d.ZERO;
             state.position = preventFloorPenetration(state.position);
         }
@@ -152,8 +133,6 @@ public class ShipPhysicsEngine {
         state.position = JoltPhysicsSystem.getInstance()
                 .getBodyPosition(shipId, hullData, state.position);
     }
-
-    // ---- Water surface ---------------------------------------------------
 
     private void refreshWaterSurface() {
         if (waterSurfaceCacheTicks <= 0 || Double.isNaN(cachedWaterSurfaceY)) {
@@ -175,13 +154,11 @@ public class ShipPhysicsEngine {
             if (!fluid.isEmpty()) {
                 int consecutive = 0;
                 for (int dy = 0; dy < MIN_OPEN_WATER_DEPTH; dy++) {
-                    FluidState below = world.getFluidState(new BlockPos(scanX, y - dy, scanZ));
-                    if (!below.isEmpty()) consecutive++;
+                    if (!world.getFluidState(new BlockPos(scanX, y - dy, scanZ)).isEmpty())
+                        consecutive++;
                     else break;
                 }
-                if (consecutive >= MIN_OPEN_WATER_DEPTH) {
-                    return y + 1.0D;
-                }
+                if (consecutive >= MIN_OPEN_WATER_DEPTH) return y + 1.0D;
             }
         }
         return Double.NaN;
@@ -192,15 +169,12 @@ public class ShipPhysicsEngine {
         return state.position.y + offset;
     }
 
-    // ---- Floor penetration guard (land/air only) -------------------------
-
     private static final double MAX_PUSH_PER_TICK = 1.0D;
 
     private Vec3d preventFloorPenetration(Vec3d pos) {
         if (hullBounds == null) return pos;
         double minYOffset  = hullBounds.minY();
         double totalPushed = 0.0D;
-
         for (int attempt = 0; attempt < 16; attempt++) {
             BlockPos check = new BlockPos(
                 MathHelper.floor(pos.x),
@@ -209,29 +183,21 @@ public class ShipPhysicsEngine {
             );
             BlockState bs = world.getBlockState(check);
             if (!bs.isSolidBlock(world, check)) break;
-
             double blockTop    = check.getY() + 1.0D;
             double penetration = blockTop - (pos.y + minYOffset);
-            double push        = Math.min(penetration + 0.001D,
-                                         MAX_PUSH_PER_TICK - totalPushed);
+            double push        = Math.min(penetration + 0.001D, MAX_PUSH_PER_TICK - totalPushed);
             if (push <= 0.0D) break;
-
             pos         = pos.add(0.0D, push, 0.0D);
             totalPushed += push;
             state.velocity = new Vec3d(state.velocity.x, 0.0D, state.velocity.z);
-
             if (totalPushed >= MAX_PUSH_PER_TICK) break;
         }
         return pos;
     }
 
-    // ---- Helpers ---------------------------------------------------------
-
     private Vec3d clipVelocity(Vec3d v) {
         double speed = v.length();
-        return speed > PhysicsConfig.MAX_VELOCITY
-            ? v.normalize().multiply(PhysicsConfig.MAX_VELOCITY)
-            : v;
+        return speed > PhysicsConfig.MAX_VELOCITY ? v.normalize().multiply(PhysicsConfig.MAX_VELOCITY) : v;
     }
 
     private boolean isAtRest() {

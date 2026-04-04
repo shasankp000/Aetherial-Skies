@@ -22,6 +22,9 @@ import java.util.UUID;
  *  1. Per-ship: syncFrom -> engine.tick() -> applyTo
  *  2. JoltPhysicsSystem.stepSimulation()
  *  3. Per-ship: ShipPassengerTracker.tick(), then broadcast sync packet.
+ *
+ * Sync packets are sent every tick (needed for smooth client-side movement).
+ * All per-block hull iteration is eliminated via ShipStructure cached bounds.
  */
 public final class ShipTransformManager {
 
@@ -35,7 +38,6 @@ public final class ShipTransformManager {
 
     public void init(MinecraftServer server) {
         this.server = server;
-        // Register the C2S steer packet handler on the server side.
         ServerPlayNetworking.registerGlobalReceiver(
             ShipSteerC2SPacket.ID,
             (srv, player, handler, buf, responseSender) -> {
@@ -44,8 +46,6 @@ public final class ShipTransformManager {
             }
         );
     }
-
-    // ---- Ship lifecycle --------------------------------------------------
 
     public void onShipDeployed(ShipStructure structure) {
         UUID shipId = structure.getShipId();
@@ -59,7 +59,8 @@ public final class ShipTransformManager {
         ShipPhysicsEngine engine = new ShipPhysicsEngine(
             shipId, state, server.getOverworld());
         engine.setHullData(structure.getHullData());
-        engine.setHullBounds(structure.getHullData().computeBounds());
+        // Use the pre-computed cached bounds — no computeBounds() call here.
+        engine.setHullBounds(structure.getCachedBounds());
         engines.put(shipId, engine);
 
         JoltPhysicsSystem.getInstance().registerShipBody(
@@ -75,14 +76,12 @@ public final class ShipTransformManager {
         JoltPhysicsSystem.getInstance().removeShipBody(shipId);
     }
 
-    // ---- Tick ------------------------------------------------------------
-
     public void tick() {
         if (server == null) return;
 
         List<ServerPlayerEntity> players = server.getPlayerManager().getPlayerList();
 
-        // Phase 1: inject steer input, then PD tick.
+        // Phase 1: steer input + physics tick.
         for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
             if (!structure.isPhysicsActive()) continue;
 
@@ -92,7 +91,6 @@ public final class ShipTransformManager {
                 engine = engines.get(structure.getShipId());
             }
 
-            // Feed this tick's steer input into the engine.
             ShipSteerInput steer = ShipPilotManager.getInstance().getSteerInput(structure.getShipId());
             engine.setSteerInput(steer);
 
@@ -107,9 +105,6 @@ public final class ShipTransformManager {
         // Phase 3: passengers + broadcast.
         for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
             if (!structure.isPhysicsActive()) continue;
-
-            ShipPhysicsEngine engine = engines.get(structure.getShipId());
-            if (engine == null) continue;
 
             ShipPassengerTracker.tick(structure, players);
 
