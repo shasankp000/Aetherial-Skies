@@ -536,7 +536,12 @@ public class GravityBlockEntity extends Entity {
         Vec3d result = velocity;
         boolean grounded = this.isOnGround() || (this.verticalCollision && result.y <= 0.0D);
 
-        if (grounded) {
+        // Skip floor-guard settle logic while in fluid: the buoyancy controller owns
+        // vertical position when floating, and isOnGround() against the ocean floor
+        // can otherwise trigger the bounce+centering block and launch the entity upward.
+        boolean inFluid = this.isTouchingWater() || this.isInLava();
+
+        if (grounded && !inFluid) {
             landingTimer++;
             this.getDataTracker().set(TIMER_STATE, landingTimer);
 
@@ -563,11 +568,13 @@ public class GravityBlockEntity extends Entity {
             double centeredX = lerp(settleAlpha, this.getX(), pos.getX() + 0.5D);
             double centeredZ = lerp(settleAlpha, this.getZ(), pos.getZ() + 0.5D);
             this.setPosition(centeredX, this.getY(), centeredZ);
-        } else {
+        } else if (!inFluid) {
+            // Only reset landingTimer/settleTicks when not in fluid and not grounded.
             landingTimer = 0;
             settleTicks = 0;
             this.getDataTracker().set(TIMER_STATE, landingTimer);
         }
+        // When inFluid: leave both branches alone — buoyancy owns vertical authority.
 
         if (this.horizontalCollision) {
             double wallDamping = 0.25D + (MathHelper.clamp(profile.restitution(), 0.0f, 0.6f) * 0.35D);
