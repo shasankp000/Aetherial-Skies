@@ -27,6 +27,14 @@ public class ShipPhysicsEngine {
     private int    waterSurfaceCacheTicks = 0;
     private static final int WATER_SURFACE_CACHE_TICKS = 3;
 
+    /**
+     * Minimum number of consecutive fluid blocks that must be present in a
+     * column (scanning downward from the candidate surface) to qualify as open
+     * water.  A value of 2 rejects single waterlogged blocks embedded in stone
+     * (e.g. ocean-floor cracks) while accepting any genuine body of water.
+     */
+    private static final int MIN_OPEN_WATER_DEPTH = 2;
+
     private boolean inWater    = false;
     private boolean wasInWater = false;
 
@@ -124,23 +132,32 @@ public class ShipPhysicsEngine {
                 state.velocity = state.velocity.multiply(PhysicsConfig.SETTLE_DAMPING);
                 AetherialSkies.LOGGER.info("[PhysTrace t={}] ship={} AT_REST damping applied", t, sid);
             }
+
+            // ── FIX 1: The PD controller owns vertical position in water.
+            //    The floor-penetration guard must NOT run while inWater=true;
+            //    doing so causes a +1 block/tick runaway when the ocean floor
+            //    is stone directly below the ship's pivot XZ.
+            AetherialSkies.LOGGER.info(
+                "[PhysTrace t={}] ship={} FLOOR_GUARD skipped (inWater=true)",
+                t, sid);
+
         } else {
             state.velocity = Vec3d.ZERO;
             AetherialSkies.LOGGER.info(
                 "[PhysTrace t={}] ship={} LAND_MODE vel zeroed pos.y unchanged={}",
                 t, sid, String.format("%.6f", state.position.y));
-        }
 
-        // ── Floor penetration guard ──────────────────────────────────────────
-        double preFloorY = state.position.y;
-        state.position = preventFloorPenetration(state.position);
-        if (state.position.y != preFloorY) {
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} FLOOR_PUSH preY={} postY={} delta={}",
-                t, sid,
-                String.format("%.6f", preFloorY),
-                String.format("%.6f", state.position.y),
-                String.format("%.6f", state.position.y - preFloorY));
+            // Floor guard only applies on land/air.
+            double preFloorY = state.position.y;
+            state.position = preventFloorPenetration(state.position);
+            if (state.position.y != preFloorY) {
+                AetherialSkies.LOGGER.info(
+                    "[PhysTrace t={}] ship={} FLOOR_PUSH preY={} postY={} delta={}",
+                    t, sid,
+                    String.format("%.6f", preFloorY),
+                    String.format("%.6f", state.position.y),
+                    String.format("%.6f", state.position.y - preFloorY));
+            }
         }
 
         AetherialSkies.LOGGER.info(
@@ -179,14 +196,46 @@ public class ShipPhysicsEngine {
         }
     }
 
+    /**
+     * Scans downward from slightly above the ship's current Y to find the
+     * first fluid block.  To avoid mistaking a single waterlogged block in
+     * stone for open water, we require at least {@link #MIN_OPEN_WATER_DEPTH}
+     * consecutive fluid blocks below the candidate surface.
+     *
+     * <p>FIX 2: The previous implementation accepted any solitary fluid block
+     * (e.g. a waterlogged crack at the ocean floor) as the surface.  This
+     * caused the ship's waterY to resolve to y=63 even when the entire column
+     * at the pivot XZ was stone, making the ship think it was in water, then
+     * immediately "not in water" after the first floor push, resulting in an
+     * infinite +1 block/tick climb.
+     */
     private double findWaterSurfaceY() {
         int scanX  = MathHelper.floor(state.position.x);
         int scanZ  = MathHelper.floor(state.position.z);
         int startY = MathHelper.floor(state.position.y) + 4;
         int endY   = startY - 24;
+
         for (int y = startY; y >= endY; y--) {
             FluidState fluid = world.getFluidState(new BlockPos(scanX, y, scanZ));
-            if (!fluid.isEmpty()) return y + 1.0D;
+            if (!fluid.isEmpty()) {
+                // Confirm open water: require MIN_OPEN_WATER_DEPTH consecutive
+                // fluid blocks below (inclusive of the one we just found).
+                int consecutive = 0;
+                for (int dy = 0; dy < MIN_OPEN_WATER_DEPTH; dy++) {
+                    FluidState below = world.getFluidState(new BlockPos(scanX, y - dy, scanZ));
+                    if (!below.isEmpty()) consecutive++;
+                    else break;
+                }
+                if (consecutive >= MIN_OPEN_WATER_DEPTH) {
+                    AetherialSkies.LOGGER.info(
+                        "[PhysTrace] ship={} WATER_SCAN found surface y={} (consecutive={})",
+                        shipId.toString().substring(0, 8), y + 1.0D, consecutive);
+                    return y + 1.0D;
+                }
+                AetherialSkies.LOGGER.info(
+                    "[PhysTrace] ship={} WATER_SCAN rejected y={} (consecutive={} < MIN={})",
+                    shipId.toString().substring(0, 8), y + 1.0D, consecutive, MIN_OPEN_WATER_DEPTH);
+            }
         }
         return Double.NaN;
     }
@@ -196,7 +245,7 @@ public class ShipPhysicsEngine {
         return state.position.y + offset;
     }
 
-    // ---- Floor penetration guard ----------------------------------------
+    // ---- Floor penetration guard (land/air only) -------------------------
 
     private static final double MAX_PUSH_PER_TICK = 1.0D;
 
