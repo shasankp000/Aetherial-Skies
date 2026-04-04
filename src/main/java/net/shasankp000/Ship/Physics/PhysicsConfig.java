@@ -9,17 +9,12 @@ package net.shasankp000.Ship.Physics;
  * regardless of density or pool depth.
  *
  * Tuning:
- *   BUOY_P  – proportional gain (acceleration units, blocks/tick²/block-error).
+ *   BUOY_P  – proportional gain (acceleration units, blocks/tick² per block-error).
  *              Must satisfy BUOY_P > GRAVITY at the expected operating error so
  *              the net upward acceleration can overcome gravity.
- *              At error=1 block, a_buoy = BUOY_P – GRAVITY must be > 0.
- *              Previous value (0.06) gave a_buoy = 0.06 – 0.04 = 0.02 at error=1,
- *              which was divided by mass (76), leaving only 0.00026/tick² — the
- *              ship would never float.
  *
  *   NOTE: a_buoy is NOT divided by mass.  BUOY_P/D operate on acceleration
  *         directly (like GRAVITY itself), so they are mass-independent.
- *         This matches how GRAVITY is applied in the engine (no mass division).
  *
  *   BUOY_D  – derivative (velocity) damping.  Critical damp condition:
  *              BUOY_D ≥ 2 * sqrt(BUOY_P).
@@ -68,4 +63,25 @@ public class PhysicsConfig {
 
     /** Velocity multiplier applied when at rest. */
     public static final double SETTLE_DAMPING   = 0.3D;
+
+    // ---- Propulsion ------------------------------------------------------
+
+    /**
+     * Forward/backward thrust acceleration (blocks/tick² per tick W/S is held).
+     * Applied along the ship's current yaw heading.
+     */
+    public static final double THRUST_ACCEL     = 0.015D;
+
+    /**
+     * Horizontal drag coefficient applied every tick.
+     * Separate from WATER_DRAG so the ship coasts to a stop after releasing W.
+     * Combined total drag while in water: AIR_DRAG + WATER_DRAG + HORIZ_DRAG.
+     */
+    public static final double HORIZ_DRAG       = 0.08D;
+
+    /**
+     * Yaw rotation speed in degrees per tick while A or D is held.
+     * 3°/tick = 180°/s = smooth but not twitchy.
+     */
+    public static final double TURN_RATE_DEG    = 3.0D;
 }

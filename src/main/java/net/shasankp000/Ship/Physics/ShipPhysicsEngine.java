@@ -30,13 +30,15 @@ public class ShipPhysicsEngine {
     /**
      * Minimum number of consecutive fluid blocks that must be present in a
      * column (scanning downward from the candidate surface) to qualify as open
-     * water.  A value of 2 rejects single waterlogged blocks embedded in stone
-     * (e.g. ocean-floor cracks) while accepting any genuine body of water.
+     * water.
      */
     private static final int MIN_OPEN_WATER_DEPTH = 2;
 
     private boolean inWater    = false;
     private boolean wasInWater = false;
+
+    /** Current steering input, set by ShipTransformManager before each tick. */
+    private ShipSteerInput steerInput = ShipSteerInput.NONE;
 
     private int tickCount = 0;
 
@@ -56,6 +58,11 @@ public class ShipPhysicsEngine {
         this.hullData = data;
         this.cachedWaterSurfaceY = Double.NaN;
         this.waterSurfaceCacheTicks = 0;
+    }
+
+    /** Called by ShipTransformManager before tick() to inject this tick's input. */
+    public void setSteerInput(ShipSteerInput input) {
+        this.steerInput = (input != null) ? input : ShipSteerInput.NONE;
     }
 
     public void syncFrom(ShipStructure structure) {
@@ -80,7 +87,6 @@ public class ShipPhysicsEngine {
         double hullBottomY = hullBottomWorldY();
         inWater = !Double.isNaN(cachedWaterSurfaceY) && hullBottomY <= cachedWaterSurfaceY;
 
-        // ── ENTRY trace ──────────────────────────────────────────────────────
         AetherialSkies.LOGGER.info(
             "[PhysTrace t={}] ship={} ENTRY pos.y={} vel.y={} waterY={} hullBottomY={} inWater={}",
             t, sid,
@@ -99,25 +105,18 @@ public class ShipPhysicsEngine {
         }
 
         if (inWater) {
+            // ---- 1. Vertical: buoyancy PD controller -------------------------
             double ay      = -PhysicsConfig.GRAVITY;
             double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
             double error   = targetY - hullBottomY;
 
-            // BUOY_P and BUOY_D are acceleration gains (blocks/tick² per block),
-            // exactly like GRAVITY — no mass division needed or wanted.
-            // Dividing by mass was the previous bug: with mass=76 the buoyancy
-            // acceleration shrank to ~0.003/tick², only 8% of GRAVITY, so the
-            // ship always sank.
             double rawABuoy = PhysicsConfig.BUOY_P * error
                             - PhysicsConfig.BUOY_D * state.velocity.y;
-            double a_buoy   = rawABuoy;   // acceleration, not force
+            double a_buoy   = rawABuoy;
 
-            // Clamp to ±3g so a misconfigured gain or a huge initial error
-            // cannot produce a single-tick velocity spike beyond terminal speed.
             double maxABuoy = PhysicsConfig.GRAVITY * 3.0;
             boolean wasClamped = Math.abs(a_buoy) > maxABuoy;
             a_buoy = MathHelper.clamp(a_buoy, -maxABuoy, maxABuoy);
-
             ay += a_buoy;
 
             AetherialSkies.LOGGER.info(
@@ -130,18 +129,40 @@ public class ShipPhysicsEngine {
                 wasClamped,
                 String.format("%.6f", ay));
 
-            double drag  = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG;
-            double newVy = (state.velocity.y + ay) * (1.0 - drag);
-            double newVx = state.velocity.x * (1.0 - drag);
-            double newVz = state.velocity.z * (1.0 - drag);
+            // ---- 2. Horizontal: propulsion -----------------------------------
+            // Apply thrust along the ship's current yaw heading.
+            // yaw=0 → facing south (+Z), yaw=90 → facing west (-X)
+            // Minecraft yaw convention: 0=south, 90=west, 180=north, 270=east.
+            double yawRad = Math.toRadians(state.yaw);
+            double fwdX   = -MathHelper.sin((float) yawRad);
+            double fwdZ   =  MathHelper.cos((float) yawRad);
+
+            double ax = fwdX * steerInput.forward() * PhysicsConfig.THRUST_ACCEL;
+            double az = fwdZ * steerInput.forward() * PhysicsConfig.THRUST_ACCEL;
+
+            // ---- 3. Yaw: rotation -------------------------------------------
+            // Positive turn = D = clockwise = increasing yaw.
+            float newYaw = state.yaw + (float)(steerInput.turn() * PhysicsConfig.TURN_RATE_DEG);
+            // Normalise to [0, 360)
+            newYaw = ((newYaw % 360f) + 360f) % 360f;
+            state.yaw = newYaw;
+
+            // ---- 4. Integrate velocities ------------------------------------
+            double totalDrag = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG + PhysicsConfig.HORIZ_DRAG;
+            double newVy = (state.velocity.y + ay) * (1.0 - (PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG));
+            double newVx = (state.velocity.x + ax) * (1.0 - totalDrag);
+            double newVz = (state.velocity.z + az) * (1.0 - totalDrag);
 
             state.velocity = clipVelocity(new Vec3d(newVx, newVy, newVz));
             state.position = state.position.add(state.velocity);
 
             AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} AFTER_PD newVy={} pos.y={}",
+                "[PhysTrace t={}] ship={} AFTER_STEER fwd={} turn={} yaw={} newVx={} newVz={} pos.y={}",
                 t, sid,
-                String.format("%.6f", state.velocity.y),
+                steerInput.forward(), steerInput.turn(),
+                String.format("%.2f", state.yaw),
+                String.format("%.6f", state.velocity.x),
+                String.format("%.6f", state.velocity.z),
                 String.format("%.6f", state.position.y));
 
             if (isAtRest()) {
@@ -149,19 +170,13 @@ public class ShipPhysicsEngine {
                 AetherialSkies.LOGGER.info("[PhysTrace t={}] ship={} AT_REST damping applied", t, sid);
             }
 
-            // The PD controller owns vertical position in water.
-            // The floor-penetration guard must NOT run while inWater=true.
-            AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} FLOOR_GUARD skipped (inWater=true)",
-                t, sid);
-
         } else {
+            // On land: zero velocity, floor guard only.
             state.velocity = Vec3d.ZERO;
             AetherialSkies.LOGGER.info(
                 "[PhysTrace t={}] ship={} LAND_MODE vel zeroed pos.y unchanged={}",
                 t, sid, String.format("%.6f", state.position.y));
 
-            // Floor guard only applies on land/air.
             double preFloorY = state.position.y;
             state.position = preventFloorPenetration(state.position);
             if (state.position.y != preFloorY) {
@@ -210,12 +225,6 @@ public class ShipPhysicsEngine {
         }
     }
 
-    /**
-     * Scans downward from slightly above the ship's current Y to find the
-     * first fluid block.  To avoid mistaking a single waterlogged block in
-     * stone for open water, we require at least {@link #MIN_OPEN_WATER_DEPTH}
-     * consecutive fluid blocks below the candidate surface.
-     */
     private double findWaterSurfaceY() {
         int scanX  = MathHelper.floor(state.position.x);
         int scanZ  = MathHelper.floor(state.position.z);

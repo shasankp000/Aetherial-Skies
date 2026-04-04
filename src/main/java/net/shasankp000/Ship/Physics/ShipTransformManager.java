@@ -1,8 +1,10 @@
 package net.shasankp000.Ship.Physics;
 
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.shasankp000.Physics.JoltPhysicsSystem;
+import net.shasankp000.Ship.Network.ShipSteerC2SPacket;
 import net.shasankp000.Ship.Network.ShipTransformSyncS2CPacket;
 import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
@@ -18,16 +20,8 @@ import java.util.UUID;
  *
  * Tick order per frame:
  *  1. Per-ship: syncFrom -> engine.tick() -> applyTo
- *     engine.tick() pushes the PD-computed position into Jolt via
- *     updateBodyTransform() so the broadphase AABB stays current.
- *  2. JoltPhysicsSystem.stepSimulation() -- advance Jolt one tick.
+ *  2. JoltPhysicsSystem.stepSimulation()
  *  3. Per-ship: ShipPassengerTracker.tick(), then broadcast sync packet.
- *
- * NOTE: we intentionally do NOT read back from Jolt after stepSimulation().
- * Jolt's internal position interpolation produces a slightly different Y
- * than what we set, corrupting the waterline controller. The PD engine
- * position is the authoritative source; Jolt is used only for broadphase
- * and future collision response.
  */
 public final class ShipTransformManager {
 
@@ -41,6 +35,14 @@ public final class ShipTransformManager {
 
     public void init(MinecraftServer server) {
         this.server = server;
+        // Register the C2S steer packet handler on the server side.
+        ServerPlayNetworking.registerGlobalReceiver(
+            ShipSteerC2SPacket.ID,
+            (srv, player, handler, buf, responseSender) -> {
+                ShipSteerC2SPacket.Payload p = ShipSteerC2SPacket.decode(buf);
+                srv.execute(() -> ShipPilotManager.getInstance().applySteer(player, p.forward(), p.turn()));
+            }
+        );
     }
 
     // ---- Ship lifecycle --------------------------------------------------
@@ -80,7 +82,7 @@ public final class ShipTransformManager {
 
         List<ServerPlayerEntity> players = server.getPlayerManager().getPlayerList();
 
-        // Phase 1: PD controller tick + push position into Jolt broadphase.
+        // Phase 1: inject steer input, then PD tick.
         for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
             if (!structure.isPhysicsActive()) continue;
 
@@ -90,15 +92,19 @@ public final class ShipTransformManager {
                 engine = engines.get(structure.getShipId());
             }
 
+            // Feed this tick's steer input into the engine.
+            ShipSteerInput steer = ShipPilotManager.getInstance().getSteerInput(structure.getShipId());
+            engine.setSteerInput(steer);
+
             engine.syncFrom(structure);
             engine.tick();
             engine.applyTo(structure);
         }
 
-        // Phase 2: step Jolt (updates broadphase, runs contact callbacks).
+        // Phase 2: step Jolt.
         JoltPhysicsSystem.getInstance().stepSimulation();
 
-        // Phase 3: passengers + broadcast. NO Jolt read-back.
+        // Phase 3: passengers + broadcast.
         for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
             if (!structure.isPhysicsActive()) continue;
 

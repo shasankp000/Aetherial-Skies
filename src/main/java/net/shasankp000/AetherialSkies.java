@@ -19,6 +19,7 @@ import net.shasankp000.Registry.ModEntityTypes;
 import net.shasankp000.Registry.ModItems;
 import net.shasankp000.Ship.Command.ShipCommands;
 import net.shasankp000.Ship.Network.ShipDeployS2CPacket;
+import net.shasankp000.Ship.Physics.ShipPilotManager;
 import net.shasankp000.Ship.Physics.ShipTransformManager;
 import net.shasankp000.Ship.Structure.ShipStructure;
 import net.shasankp000.Ship.Structure.ShipStructureManager;
@@ -62,12 +63,7 @@ public class AetherialSkies implements ModInitializer {
             JoltPhysicsSystem.getInstance().destroy();
         });
 
-        // --- JOIN replay -------------------------------------------------
-        // ServerPlayConnectionEvents.JOIN fires AFTER the channel registration
-        // handshake is complete, so canSend() will return true here.
-        // We replay the full ShipDeployS2CPacket for every ship already active
-        // so the client's ShipTransformCache is populated before the first
-        // render tick.
+        // Replay full ship state on join.
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayerEntity player = handler.getPlayer();
             for (ShipStructure structure : ShipStructureManager.getInstance().getAllShips()) {
@@ -84,6 +80,11 @@ public class AetherialSkies implements ModInitializer {
                     structure.getHullData()
                 );
             }
+        });
+
+        // Clean up pilot session on disconnect.
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            ShipPilotManager.getInstance().onPlayerDisconnect(handler.getPlayer());
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
