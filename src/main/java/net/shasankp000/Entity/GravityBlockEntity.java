@@ -80,6 +80,10 @@ public class GravityBlockEntity extends Entity {
     private static final float SLEEP_ANGULAR_THRESHOLD = 0.08f;
     private static final float WAKE_ANGULAR_THRESHOLD = 0.18f;
 
+    // Dead-band for vertical velocity while floating: values smaller than this
+    // are clamped to zero so wave-force residue cannot accumulate into a slow climb.
+    private static final double WATER_DEAD_BAND = 0.004D;
+
     // In GravityBlockEntity
     private float miningProgress = 0.0f;
     private int lastDamageTick = 0;
@@ -299,6 +303,13 @@ public class GravityBlockEntity extends Entity {
                 if (velocity.y > 0.12D) {
                     velocity = new Vec3d(velocity.x, 0.12D, velocity.z);
                 }
+
+                // Water dead-band: kill residual vertical creep that accumulates from wave forces.
+                // Without this, small per-tick vy remainders survive drag and slowly push the block
+                // upward tick-by-tick even when buoyancy is balanced.
+                if (Math.abs(velocity.y) < WATER_DEAD_BAND) {
+                    velocity = new Vec3d(velocity.x, 0.0D, velocity.z);
+                }
             } else {
                 this.smoothedPlayerLoad = MathHelper.lerp(0.10f, this.smoothedPlayerLoad, 0.0f);
                 this.lastWaveMetric = 0.0f;
@@ -419,7 +430,12 @@ public class GravityBlockEntity extends Entity {
         Vec3d result = velocity;
         boolean grounded = this.isOnGround() || (this.verticalCollision && result.y <= 0.0D);
 
-        if (grounded) {
+        // Skip floor-guard settle logic while in water: the buoyancy PD controller
+        // owns vertical position when floating, and isOnGround() against the ocean
+        // floor can otherwise launch the block upward.
+        boolean inFluid = this.isTouchingWater() || this.isInLava();
+
+        if (grounded && !inFluid) {
             landingTimer++;
             this.getDataTracker().set(TIMER_STATE, landingTimer);
 
@@ -448,11 +464,12 @@ public class GravityBlockEntity extends Entity {
             double centeredX = lerp(settleAlpha, this.getX(), pos.getX() + 0.5D);
             double centeredZ = lerp(settleAlpha, this.getZ(), pos.getZ() + 0.5D);
             this.setPosition(centeredX, this.getY(), centeredZ);
-        } else {
+        } else if (!inFluid) {
             landingTimer = 0;
             settleTicks = 0;
             this.getDataTracker().set(TIMER_STATE, landingTimer);
         }
+        // When inFluid: leave landingTimer alone — it resets naturally when the block leaves water.
 
         if (this.horizontalCollision) {
             double wallDamping = 0.25D + (MathHelper.clamp(profile.restitution(), 0.0f, 0.6f) * 0.35D);
@@ -514,6 +531,14 @@ public class GravityBlockEntity extends Entity {
         double linearMagnitude = velocity.lengthSquared();
         float angularMagnitude = Math.abs(this.angularVelocity) + Math.abs(this.pitchAngularVelocity) + Math.abs(this.rollAngularVelocity);
         boolean grounded = this.isOnGround() || landingTimer > 0;
+
+        // Floating entities are never "grounded" for sleep purposes — the buoyancy
+        // controller keeps them alive tick-by-tick. Only apply the sleep latch on land.
+        boolean inFluid = this.isTouchingWater() || this.isInLava();
+        if (inFluid) {
+            settleTicks = 0;
+            return;
+        }
 
         if (grounded && linearMagnitude < SLEEP_LINEAR_THRESHOLD && angularMagnitude < SLEEP_ANGULAR_THRESHOLD) {
             settleTicks++;
@@ -743,7 +768,10 @@ public class GravityBlockEntity extends Entity {
         nbt.putDouble("Weight", this.weight);
         nbt.putInt("SettleTicks", this.settleTicks);
         nbt.putString("BlockId", this.getBlockIdString());
+
         if (this.blockState != null) {
+            RegistryWrapper.WrapperLookup wrapperLookup = this.getWorld().getRegistryManager();
+            RegistryEntryLookup<Block> registryEntryLookup = wrapperLookup.getOrThrow(RegistryKeys.BLOCK);
             nbt.put("BlockState", NbtHelper.fromBlockState(this.blockState));
         }
     }
@@ -751,92 +779,27 @@ public class GravityBlockEntity extends Entity {
     // Load custom data (block state) from NBT
     @Override
     protected void readCustomDataFromNbt(NbtCompound nbt) {
+        this.rotationAngle = nbt.getFloat("RotationAngle").orElse(0.0f);
+        this.previousRotationAngle = nbt.getFloat("PreviousRotationAngle").orElse(0.0f);
+        this.angularVelocity = nbt.getFloat("AngularVelocity").orElse(0.0f);
+        this.pitchAngularVelocity = nbt.getFloat("PitchAngularVelocity").orElse(0.0f);
+        this.rollAngularVelocity = nbt.getFloat("RollAngularVelocity").orElse(0.0f);
+        this.roll = nbt.getFloat("Roll").orElse(0.0f);
+        this.landingTimer = nbt.getInt("LandingTimer").orElse(0);
+        this.miningProgress = nbt.getFloat("MiningProgress").orElse(0.0f);
+        this.weight = nbt.getDouble("Weight").orElse(0.04D);
+        this.settleTicks = nbt.getInt("SettleTicks").orElse(0);
 
-        rotationAngle = nbt.getFloat("RotationAngle");
-        previousRotationAngle = nbt.contains("PreviousRotationAngle") ? nbt.getFloat("PreviousRotationAngle") : rotationAngle;
-        angularVelocity = nbt.getFloat("AngularVelocity");
-        pitchAngularVelocity = nbt.contains("PitchAngularVelocity") ? nbt.getFloat("PitchAngularVelocity") : 0.0f;
-        rollAngularVelocity = nbt.contains("RollAngularVelocity") ? nbt.getFloat("RollAngularVelocity") : 0.0f;
-        this.roll = nbt.contains("Roll") ? nbt.getFloat("Roll") : 0.0f;
-        this.landingTimer = nbt.contains("LandingTimer") ? nbt.getInt("LandingTimer") : 0;
-        this.settleTicks = nbt.contains("SettleTicks") ? nbt.getInt("SettleTicks") : 0;
-        this.miningProgress = nbt.contains("MiningProgress") ? nbt.getFloat("MiningProgress") : 0.0f;
-        this.weight = nbt.contains("Weight") ? nbt.getDouble("Weight") : this.weight;
-
-        RegistryWrapper.WrapperLookup registryLookup = this.getWorld().getRegistryManager();
-        RegistryEntryLookup<Block> blockLookup = registryLookup.getOrThrow(RegistryKeys.BLOCK);
-        BlockState restoredState = null;
         if (nbt.contains("BlockState")) {
-            restoredState = NbtHelper.toBlockState(blockLookup, nbt.getCompound("BlockState"));
-        } else if (nbt.contains("BlockId")) {
-            restoredState = BlockStateRegistry.getDefaultStateFor(nbt.getString("BlockId"));
+            RegistryWrapper.WrapperLookup wrapperLookup = this.getWorld().getRegistryManager();
+            RegistryEntryLookup<Block> registryEntryLookup = wrapperLookup.getOrThrow(RegistryKeys.BLOCK);
+            this.blockState = NbtHelper.toBlockState(registryEntryLookup, nbt.getCompoundOrEmpty("BlockState"));
+            this.getDataTracker().set(BLOCK_STATE, this.blockState);
         }
-
-        this.setBlockState(restoredState == null ? Blocks.AIR.getDefaultState() : restoredState);
-        this.getDataTracker().set(ROLL, this.roll);
-        this.getDataTracker().set(TIMER_STATE, this.landingTimer);
-        this.getDataTracker().set(MINING_PROGRESS, this.miningProgress);
-        this.getDataTracker().set(ROTATION, this.rotationAngle);
-        this.getDataTracker().set(PREVIOUS_ROTATION, this.previousRotationAngle);
-        this.getDataTracker().set(VERTICAL_SPEED, nbt.contains("VerticalSpeed") ? nbt.getFloat("VerticalSpeed") : 0.0f);
-        this.getDataTracker().set(HORIZONTAL_SPEED, nbt.contains("HorizontalSpeed") ? nbt.getFloat("HorizontalSpeed") : 0.0f);
-        this.getDataTracker().set(IMPACT_AMPLITUDE, nbt.contains("ImpactAmplitude") ? nbt.getFloat("ImpactAmplitude") : 0.0f);
-        this.getDataTracker().set(SETTLE_PROGRESS, nbt.contains("SettleProgress") ? nbt.getFloat("SettleProgress") : 0.0f);
-        this.smoothedPlayerLoad = nbt.contains("PlayerLoad") ? nbt.getFloat("PlayerLoad") : 0.0f;
-        this.lastWaveMetric = nbt.contains("WaveMetric") ? nbt.getFloat("WaveMetric") : 0.0f;
-        this.getDataTracker().set(WAVE_METRIC, this.lastWaveMetric);
-        this.getDataTracker().set(PLAYER_LOAD, this.smoothedPlayerLoad);
     }
 
-
-
-    // getters and setters
-
-    public Vec3d getCenterOfMassOffset() {
-        return centerOfMassOffset;
-    }
-
-    public void setCenterOfMassOffset(Vec3d centerOfMassOffset) {
-        this.centerOfMassOffset = centerOfMassOffset;
-    }
-
-    public float getRotationAngle() {
-        return rotationAngle;
-    }
-
-    public void setRotationAngle(float rotationAngle) {
-        this.rotationAngle = rotationAngle;
-    }
-
-    public float getPreviousRotationAngle() {
-        return previousRotationAngle;
-    }
-
-    public void setPreviousRotationAngle(float previousRotationAngle) {
-        this.previousRotationAngle = previousRotationAngle;
-    }
-
-    public float getAngularVelocity() {
-        return angularVelocity;
-    }
-
-    public void setAngularVelocity(float angularVelocity) {
-        this.angularVelocity = angularVelocity;
-    }
-
-    public float getAngularMomentum() {
-        return angularMomentum;
-    }
-
-    public void setAngularMomentum(float angularMomentum) {
-        this.angularMomentum = angularMomentum;
-    }
-
-    public double getWeight() {
-        return weight;
-    }
-
-    public void setWeight(double weight) {
-        this.weight = weight;
+    @Override
+    public boolean shouldSave() {
+        return true;
     }
 }
