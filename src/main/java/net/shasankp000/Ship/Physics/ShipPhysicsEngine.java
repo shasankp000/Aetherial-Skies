@@ -102,16 +102,33 @@ public class ShipPhysicsEngine {
             double ay      = -PhysicsConfig.GRAVITY;
             double targetY = cachedWaterSurfaceY - PhysicsConfig.TARGET_DRAFT;
             double error   = targetY - hullBottomY;
-            double a_buoy  = PhysicsConfig.BUOY_P * error
-                           - PhysicsConfig.BUOY_D * state.velocity.y;
+
+            // FIX: divide by hull mass so acceleration = force / mass.
+            // Without this, a_buoy scales with mass and causes a runaway
+            // upward spike on large ships or on the first tick after spawn.
+            // Default to 1.0 when hullData is not yet set (massless probe).
+            double totalMass = (hullData != null) ? Math.max(1.0, hullData.totalMass()) : 1.0;
+            double rawABuoy  = PhysicsConfig.BUOY_P * error
+                             - PhysicsConfig.BUOY_D * state.velocity.y;
+            double a_buoy    = rawABuoy / totalMass;
+
+            // Clamp to ±3g so a misconfigured gain or a huge initial error
+            // cannot produce a single-tick velocity spike beyond terminal speed.
+            double maxABuoy = PhysicsConfig.GRAVITY * 3.0;
+            boolean wasClamped = Math.abs(a_buoy) > maxABuoy;
+            a_buoy = MathHelper.clamp(a_buoy, -maxABuoy, maxABuoy);
+
             ay += a_buoy;
 
             AetherialSkies.LOGGER.info(
-                "[PhysTrace t={}] ship={} PD targetY={} error={} a_buoy={} ay={}",
+                "[PhysTrace t={}] ship={} PD targetY={} error={} rawABuoy={} mass={} a_buoy={} clamped={} ay={}",
                 t, sid,
                 String.format("%.6f", targetY),
                 String.format("%.6f", error),
+                String.format("%.6f", rawABuoy),
+                String.format("%.3f", totalMass),
                 String.format("%.6f", a_buoy),
+                wasClamped,
                 String.format("%.6f", ay));
 
             double drag  = PhysicsConfig.AIR_DRAG + PhysicsConfig.WATER_DRAG;
