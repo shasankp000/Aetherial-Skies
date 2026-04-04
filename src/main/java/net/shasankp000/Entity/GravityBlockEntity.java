@@ -70,11 +70,19 @@ public class GravityBlockEntity extends Entity {
     private int landingTimer = 0;
     private int settleTicks = 0;
 
+    // Separate settle counter for the water dead-band path.
+    private int waterSettleTicks = 0;
+
     private static final int REQUIRED_SLEEP_TICKS = 14;
     private static final double SLEEP_LINEAR_THRESHOLD = 0.0009D;
     private static final double WAKE_LINEAR_THRESHOLD = 0.01D;
     private static final float SLEEP_ANGULAR_THRESHOLD = 0.08f;
     private static final float WAKE_ANGULAR_THRESHOLD = 0.18f;
+
+    // Water dead-band: if |vel.y| is below this while floating, snap it to zero.
+    private static final double WATER_SLEEP_VY_THRESHOLD = 0.0008D;
+    // Require this many consecutive quiet ticks before snapping, to avoid locking during wave hits.
+    private static final int WATER_REQUIRED_SLEEP_TICKS = 10;
 
     // In GravityBlockEntity
     private float miningProgress = 0.0f;
@@ -316,7 +324,6 @@ public class GravityBlockEntity extends Entity {
                 velocity = velocity.add(0.0D, -profile.gravityAccel(), 0.0D);
 
                 // Drive angular velocity from horizontal motion during freefall.
-                // Heavier blocks (higher mass) tumble less than lighter ones.
                 double horizontalSpeed = velocity.horizontalLength();
                 if (!this.isOnGround() && landingTimer == 0) {
                     float tumbleFactor = MathHelper.clamp(
@@ -325,7 +332,6 @@ public class GravityBlockEntity extends Entity {
                             2.5f
                     );
                     angularVelocity += tumbleFactor;
-                    // Add a randomized pitch component so tumble is not purely yaw.
                     pitchAngularVelocity += tumbleFactor * 0.4f * (this.random.nextBoolean() ? 1f : -1f);
                 }
             }
@@ -383,7 +389,6 @@ public class GravityBlockEntity extends Entity {
     private float getSampledPlayerLoadTarget() {
         if (this.age >= this.nextPlayerLoadSampleAge) {
             this.cachedPlayerLoadTarget = this.computePlayerLoadTarget();
-            // Stagger entity sampling to avoid all floating blocks querying players on the same tick.
             this.nextPlayerLoadSampleAge = this.age + PLAYER_LOAD_SAMPLE_INTERVAL + (this.getId() & 1);
         }
         return this.cachedPlayerLoadTarget;
@@ -427,17 +432,13 @@ public class GravityBlockEntity extends Entity {
             massProxyTotal += this.estimatePlayerMassProxy(player);
         }
 
-        // Option C hybrid (players): combine count and mass proxies with clamping for stability.
         float countTerm = Math.min(0.32f, players.size() * 0.10f);
         float massTerm = Math.min(0.35f, massProxyTotal * 0.12f);
 
-        // Additional support load from stacked gravity blocks standing on this block.
         List<GravityBlockEntity> stackedBlocks = this.getStackedBlocksAbove();
-
         float stackedMassProxy = 0.0f;
         for (GravityBlockEntity stacked : stackedBlocks) {
             float stackedMass = Math.max(0.5f, GravityData.getProfile(stacked.getBlockState().getBlock()).mass());
-            // Dampen raw mass to keep buoyancy response stable while still making heavy-on-light stacks sink.
             stackedMassProxy += MathHelper.clamp(stackedMass * 0.58f, 0.30f, 1.60f);
         }
 
@@ -463,121 +464,69 @@ public class GravityBlockEntity extends Entity {
     }
 
     private boolean isStackedOnTop(GravityBlockEntity block, Box thisBox) {
-        if (block == this) {
-            return false;
-        }
+        if (block == this) return false;
         Box otherBox = block.getBoundingBox();
-
         double verticalOffset = otherBox.minY - thisBox.maxY;
-        if (verticalOffset < -0.32D || verticalOffset > 0.72D) {
-            return false;
-        }
-
-        // Face-to-face stacked contacts can "touch" without strict AABB intersection.
+        if (verticalOffset < -0.32D || verticalOffset > 0.72D) return false;
         double overlapEpsilon = 0.04D;
         boolean overlapsX = otherBox.maxX >= thisBox.minX + overlapEpsilon && otherBox.minX <= thisBox.maxX - overlapEpsilon;
         boolean overlapsZ = otherBox.maxZ >= thisBox.minZ + overlapEpsilon && otherBox.minZ <= thisBox.maxZ - overlapEpsilon;
-        if (!overlapsX || !overlapsZ) {
-            return false;
-        }
-
-        return block.getX() >= thisBox.minX - 0.10D
-                && block.getX() <= thisBox.maxX + 0.10D
-                && block.getZ() >= thisBox.minZ - 0.10D
-                && block.getZ() <= thisBox.maxZ + 0.10D;
+        if (!overlapsX || !overlapsZ) return false;
+        return block.getX() >= thisBox.minX - 0.10D && block.getX() <= thisBox.maxX + 0.10D
+                && block.getZ() >= thisBox.minZ - 0.10D && block.getZ() <= thisBox.maxZ + 0.10D;
     }
 
     private Vec3d applyStackedFluidInteractions(Vec3d velocity, float fluidDepth, float selfMass) {
-        if (fluidDepth <= 0.0f || (this.age % 2) != 0) {
-            return velocity;
-        }
-
+        if (fluidDepth <= 0.0f || (this.age % 2) != 0) return velocity;
         List<GravityBlockEntity> stackedBlocks = this.getStackedBlocksAbove();
-        if (stackedBlocks.isEmpty()) {
-            return velocity;
-        }
+        if (stackedBlocks.isEmpty()) return velocity;
 
         float totalStackMass = 0.0f;
         for (GravityBlockEntity stacked : stackedBlocks) {
             totalStackMass += Math.max(0.5f, GravityData.getProfile(stacked.getBlockState().getBlock()).mass());
         }
 
-        // Additional downward pull so heavy-on-light stacks do not remain unrealistically static.
         double stackedDownforce = MathHelper.clamp(totalStackMass * 0.022f * fluidDepth, 0.0f, 0.22f);
         Vec3d adjusted = velocity.add(0.0D, -stackedDownforce, 0.0D);
 
         for (GravityBlockEntity stacked : stackedBlocks) {
             float stackedMass = Math.max(0.5f, GravityData.getProfile(stacked.getBlockState().getBlock()).mass());
-            if (stackedMass <= (selfMass * 1.05f)) {
-                continue;
-            }
-
+            if (stackedMass <= (selfMass * 1.05f)) continue;
             double dx = stacked.getX() - this.getX();
             double dz = stacked.getZ() - this.getZ();
             double d = Math.sqrt((dx * dx) + (dz * dz));
             if (d < 1.0E-4D) {
-                // Deterministic fallback direction so perfectly centered stacks can still shear.
                 double phase = (this.age * 0.31D) + (this.getId() * 0.17D);
-                dx = Math.cos(phase);
-                dz = Math.sin(phase);
-                d = 1.0D;
+                dx = Math.cos(phase); dz = Math.sin(phase); d = 1.0D;
             }
-            dx /= d;
-            dz /= d;
-
+            dx /= d; dz /= d;
             double shear = MathHelper.clamp((stackedMass - selfMass) * 0.010f * fluidDepth, 0.0035f, 0.028f);
             stacked.addVelocity(dx * shear, 0.0D, dz * shear);
             this.addVelocity(-dx * shear * 0.25D, 0.0D, -dz * shear * 0.25D);
         }
-
         return adjusted;
     }
 
     private float estimatePlayerMassProxy(PlayerEntity player) {
         float proxy = 1.0f;
         for (ItemStack armorStack : player.getArmorItems()) {
-            if (!armorStack.isEmpty()) {
-                proxy += 0.07f;
-            }
+            if (!armorStack.isEmpty()) proxy += 0.07f;
         }
-        if (!player.getMainHandStack().isEmpty()) {
-            proxy += 0.04f;
-        }
-        if (player.isSneaking()) {
-            proxy += 0.05f;
-        }
+        if (!player.getMainHandStack().isEmpty()) proxy += 0.04f;
+        if (player.isSneaking()) proxy += 0.05f;
         return proxy;
     }
 
     public boolean isTopSupportedPlayer(Entity candidate) {
-        if (!(candidate instanceof PlayerEntity other)) {
-            return false;
-        }
-
+        if (!(candidate instanceof PlayerEntity other)) return false;
         Box thisBox = this.getBoundingBox();
         Box otherBox = other.getBoundingBox();
-        if (!thisBox.intersects(otherBox)) {
-            return false;
-        }
-
-        // Treat players as "standing on top" while their feet are near the top face,
-        // even with slight overlap from bobbing/latency.
+        if (!thisBox.intersects(otherBox)) return false;
         double footOffsetFromTop = otherBox.minY - thisBox.maxY;
-        if (footOffsetFromTop < -0.30D || footOffsetFromTop > 0.30D) {
-            return false;
-        }
-
-        // Keep side collisions working: only exempt push if the player center is over the top plane.
-        boolean overTopPlane =
-                other.getX() >= thisBox.minX &&
-                other.getX() <= thisBox.maxX &&
-                other.getZ() >= thisBox.minZ &&
-                other.getZ() <= thisBox.maxZ;
-
-        if (!overTopPlane) {
-            return false;
-        }
-
+        if (footOffsetFromTop < -0.30D || footOffsetFromTop > 0.30D) return false;
+        boolean overTopPlane = other.getX() >= thisBox.minX && other.getX() <= thisBox.maxX
+                && other.getZ() >= thisBox.minZ && other.getZ() <= thisBox.maxZ;
+        if (!overTopPlane) return false;
         boolean aboveBlockMidline = otherBox.maxY > thisBox.maxY + 0.10D;
         boolean notStronglyAscending = other.getVelocity().y <= 0.16D;
         return aboveBlockMidline && notStronglyAscending;
@@ -595,9 +544,7 @@ public class GravityBlockEntity extends Entity {
             if (normalInSpeed > 0.03D) {
                 double restitution = MathHelper.clamp(profile.restitution(), 0.0f, 0.8f);
                 double bouncedY = normalInSpeed * restitution;
-                if (bouncedY < 0.04D) {
-                    bouncedY = 0.0D;
-                }
+                if (bouncedY < 0.04D) bouncedY = 0.0D;
 
                 result = new Vec3d(result.x, bouncedY, result.z);
 
@@ -634,42 +581,28 @@ public class GravityBlockEntity extends Entity {
     }
 
     private Vec3d applyGroundFriction(Vec3d velocity, GravityData.PhysicsProfile profile, float mass) {
-        // Invert friction feel: higher groundFriction values stop faster, lower values slide longer.
         double retention = MathHelper.clamp(1.0f - (profile.groundFriction() * 0.55f), 0.35f, 0.72f);
         double staticCutoff = 0.018D * mass;
         GravityBlockEntity support = this.findSupportingGravityBlockBelow();
         if (support != null) {
             boolean floatingSupport = support.isTouchingWater() || support.isInLava() || !support.isOnGround();
             if (floatingSupport) {
-                // Entity-on-entity contact in fluid should not lock like ground friction.
                 retention = MathHelper.clamp(retention + 0.18D, 0.55D, 0.92D);
                 staticCutoff *= 0.35D;
             }
         }
-
         double velX = velocity.x * retention;
         double velZ = velocity.z * retention;
-
-        if (Math.abs(velX) < staticCutoff) {
-            velX = 0.0D;
-        }
-        if (Math.abs(velZ) < staticCutoff) {
-            velZ = 0.0D;
-        }
-
+        if (Math.abs(velX) < staticCutoff) velX = 0.0D;
+        if (Math.abs(velZ) < staticCutoff) velZ = 0.0D;
         return new Vec3d(velX, velocity.y, velZ);
     }
 
     private GravityBlockEntity findSupportingGravityBlockBelow() {
         Box thisBox = this.getBoundingBox();
-        Box probe = thisBox
-                .expand(-0.04D, 0.0D, -0.04D)
-                .stretch(0.0D, -0.22D, 0.0D)
-                .offset(0.0D, -0.02D, 0.0D);
-
+        Box probe = thisBox.expand(-0.04D, 0.0D, -0.04D).stretch(0.0D, -0.22D, 0.0D).offset(0.0D, -0.02D, 0.0D);
         List<GravityBlockEntity> supports = this.getWorld().getEntitiesByClass(
-                GravityBlockEntity.class,
-                probe,
+                GravityBlockEntity.class, probe,
                 block -> block != this && block.getBoundingBox().maxY <= thisBox.minY + 0.08D
         );
         return supports.isEmpty() ? null : supports.get(0);
@@ -678,61 +611,45 @@ public class GravityBlockEntity extends Entity {
     private boolean applyFloatingStackShear(GravityBlockEntity other, Box thisBox, Box otherBox) {
         boolean otherAboveThis = otherBox.minY >= thisBox.maxY - 0.06D;
         boolean thisAboveOther = thisBox.minY >= otherBox.maxY - 0.06D;
-        if (!otherAboveThis && !thisAboveOther) {
-            return false;
-        }
+        if (!otherAboveThis && !thisAboveOther) return false;
 
         GravityBlockEntity lower = otherAboveThis ? this : other;
         GravityBlockEntity upper = otherAboveThis ? other : this;
         boolean floatingStack = lower.isTouchingWater() || lower.isInLava() || !lower.isOnGround();
-        if (!floatingStack) {
-            // On land we keep stacks stable and avoid oscillation.
-            return true;
-        }
+        if (!floatingStack) return true;
 
-        // Rate-limit stack shear impulses to prevent high-frequency rattle.
-        if (this.age < this.nextStackShearImpulseAge && other.age < other.nextStackShearImpulseAge) {
-            return true;
-        }
+        if (this.age < this.nextStackShearImpulseAge && other.age < other.nextStackShearImpulseAge) return true;
 
         float lowerMass = Math.max(0.5f, GravityData.getProfile(lower.getBlockState().getBlock()).mass());
         float upperMass = Math.max(0.5f, GravityData.getProfile(upper.getBlockState().getBlock()).mass());
         float massExcess = upperMass - (lowerMass * 0.95f);
-        if (massExcess <= 0.0f) {
-            return true;
-        }
+        if (massExcess <= 0.0f) return true;
 
         double dx = upper.getX() - lower.getX();
         double dz = upper.getZ() - lower.getZ();
         double distance = Math.sqrt((dx * dx) + (dz * dz));
         if (distance < 1.0E-4D) {
             double phase = (this.getWorld().getTime() * 0.41D) + (upper.getId() * 0.13D);
-            dx = Math.cos(phase);
-            dz = Math.sin(phase);
-            distance = 1.0D;
+            dx = Math.cos(phase); dz = Math.sin(phase); distance = 1.0D;
         }
-        dx /= distance;
-        dz /= distance;
+        dx /= distance; dz /= distance;
 
         float waveMetric = Math.max(lower.lastWaveMetric, upper.lastWaveMetric);
         double shear = MathHelper.clamp((massExcess * 0.013f) + (waveMetric * 0.004f), 0.0025f, 0.032f);
         Vec3d relativeVelocity = upper.getVelocity().subtract(lower.getVelocity());
         double relativeHorizontalSpeed = Math.sqrt((relativeVelocity.x * relativeVelocity.x) + (relativeVelocity.z * relativeVelocity.z));
-        // If stack is already separating laterally, reduce extra impulse to avoid chatter.
         shear *= MathHelper.clamp(1.0D - (relativeHorizontalSpeed * 10.0D), 0.35D, 1.0D);
         upper.addVelocity(dx * shear, 0.0D, dz * shear);
         lower.addVelocity(-dx * shear * 0.22D, 0.0D, -dz * shear * 0.22D);
         upper.nextStackShearImpulseAge = upper.age + 2;
         lower.nextStackShearImpulseAge = lower.age + 2;
 
-        // Extra load transfer so heavy-on-light stacks do not appear glued at the surface.
         double centerDistance = Math.sqrt(((upper.getX() - lower.getX()) * (upper.getX() - lower.getX())) + ((upper.getZ() - lower.getZ()) * (upper.getZ() - lower.getZ())));
         double centerBias = MathHelper.clamp(1.0D - centerDistance, 0.0D, 1.0D);
         double compressionDownforce = MathHelper.clamp((massExcess * 0.012f) + (centerBias * 0.015f), 0.0f, 0.065f);
         lower.addVelocity(0.0D, -compressionDownforce, 0.0D);
         upper.addVelocity(0.0D, -compressionDownforce * 0.35D, 0.0D);
 
-        // Dampen vertical relative oscillation so stacked blocks don't "chatter" in place.
         double relativeVerticalSpeed = upper.getVelocity().y - lower.getVelocity().y;
         if (Math.abs(relativeVerticalSpeed) > 0.01D) {
             upper.addVelocity(0.0D, -relativeVerticalSpeed * 0.24D, 0.0D);
@@ -760,7 +677,6 @@ public class GravityBlockEntity extends Entity {
 
         float angularDamping = MathHelper.clamp(1.0f - profile.angularDrag(), 0.88f, 0.995f);
         if (this.isTouchingWater() || this.isInLava()) {
-            // Rotational inertia bleeds faster in fluids.
             angularDamping *= this.isInLava() ? 0.72f : 0.82f;
         }
         this.angularVelocity *= angularDamping;
@@ -773,6 +689,24 @@ public class GravityBlockEntity extends Entity {
         double linearMagnitude = velocity.lengthSquared();
         float angularMagnitude = Math.abs(this.angularVelocity) + Math.abs(this.pitchAngularVelocity) + Math.abs(this.rollAngularVelocity);
         boolean grounded = this.isOnGround() || landingTimer > 0;
+        boolean inFluid = this.isTouchingWater() || this.isInLava();
+
+        // --- Water dead-band: snap residual vertical creep to zero when floating is settled ---
+        if (inFluid && !grounded) {
+            if (Math.abs(velocity.y) < WATER_SLEEP_VY_THRESHOLD && velocity.horizontalLength() < WAKE_LINEAR_THRESHOLD) {
+                waterSettleTicks++;
+                if (waterSettleTicks >= WATER_REQUIRED_SLEEP_TICKS) {
+                    // Zero out only vertical — leave horizontal free for wave drift.
+                    this.setVelocity(velocity.x, 0.0D, velocity.z);
+                }
+            } else {
+                waterSettleTicks = 0;
+            }
+            return;
+        }
+
+        // Reset water counter when leaving fluid.
+        waterSettleTicks = 0;
 
         if (grounded && linearMagnitude < SLEEP_LINEAR_THRESHOLD && angularMagnitude < SLEEP_ANGULAR_THRESHOLD) {
             settleTicks++;
@@ -794,33 +728,20 @@ public class GravityBlockEntity extends Entity {
     public void pushAwayFrom(Entity other) {
         if (!this.isConnectedThroughVehicle(other)) {
             if (!other.noClip && !this.noClip) {
-                // Avoid a "force field" when standing on top: only push if bodies truly overlap laterally.
-                if (!this.getBoundingBox().intersects(other.getBoundingBox())) {
-                    return;
-                }
-                if (this.shipControlled && other instanceof PlayerEntity) {
-                    return;
-                }
+                if (!this.getBoundingBox().intersects(other.getBoundingBox())) return;
+                if (this.shipControlled && other instanceof PlayerEntity) return;
                 if (this.shipControlled && other instanceof GravityBlockEntity otherBlock) {
                     UUID thisShip = this.linkedShipUuid;
                     UUID otherShip = otherBlock.getLinkedShipUuid();
-                    if (thisShip != null && thisShip.equals(otherShip)) {
-                        return;
-                    }
+                    if (thisShip != null && thisShip.equals(otherShip)) return;
                 }
                 if (other instanceof GravityBlockEntity) {
                     Box thisBox = this.getBoundingBox();
                     Box otherBox = other.getBoundingBox();
-                    if (this.applyFloatingStackShear((GravityBlockEntity) other, thisBox, otherBox)) {
-                        return;
-                    }
+                    if (this.applyFloatingStackShear((GravityBlockEntity) other, thisBox, otherBox)) return;
                 }
-                if (other.getBoundingBox().minY >= this.getBoundingBox().maxY - 0.02D) {
-                    return;
-                }
-                if (this.isTopSupportedPlayer(other)) {
-                    return;
-                }
+                if (other.getBoundingBox().minY >= this.getBoundingBox().maxY - 0.02D) return;
+                if (this.isTopSupportedPlayer(other)) return;
 
                 double deltaX = other.getX() - this.getX();
                 double deltaZ = other.getZ() - this.getZ();
@@ -832,20 +753,14 @@ public class GravityBlockEntity extends Entity {
                     GravityData.PhysicsProfile profile = GravityData.getProfile(this.getDataTracker().get(BLOCK_STATE).getBlock());
                     float mass = Math.max(0.5f, profile.mass());
                     float collisionStrictness = MathHelper.clamp(mass / 3.0f, 0.45f, 1.35f);
-
-                    // Heavier blocks feel more "solid" and displace entities more decisively.
                     double pushForce = 0.035 + (0.045 * collisionStrictness);
                     double pushX = deltaX * pushForce;
                     double pushZ = deltaZ * pushForce;
-
-                    // Make the gravity block feel solid by pushing others away from its center.
                     if (!other.hasPassengers() && other.isPushable()) {
                         double otherScale = other instanceof PlayerEntity ? (1.05 + (0.20 * collisionStrictness)) : (0.65 + (0.20 * collisionStrictness));
                         other.addVelocity(pushX * otherScale, 0.0, pushZ * otherScale);
                     }
-
                     if (!this.hasPassengers() && this.isPushable()) {
-                        // Heavier blocks recoil less when colliding.
                         double recoilScale = MathHelper.clamp(0.22 - (0.10 * collisionStrictness), 0.06, 0.22);
                         this.addVelocity(-pushX * recoilScale, 0.0, -pushZ * recoilScale);
                     }
@@ -854,157 +769,90 @@ public class GravityBlockEntity extends Entity {
         }
     }
 
-
     @Override
     public void onPlayerCollision(PlayerEntity player) {
-        if (this.isTopSupportedPlayer(player)) {
-            return;
-        }
+        if (this.isTopSupportedPlayer(player)) return;
         this.pushAwayFrom(player);
     }
 
     @Override
-    public boolean isPushable() {
-        return true;
-    }
+    public boolean isPushable() { return true; }
 
     @Override
-    public boolean isCollidable() {
-        return true;
-    }
+    public boolean isCollidable() { return true; }
 
     @Override
-    public boolean canHit() {
-        return true;
-    }
+    public boolean canHit() { return true; }
 
     @Override
     public boolean damage(DamageSource source, float amount) {
         ServerWorld world = this.getWorld() instanceof ServerWorld serverWorld ? serverWorld : null;
-        if (world == null) {
-            return false;
-        }
+        if (world == null) return false;
         boolean value = false;
         if (!world.isClient) {
             if (source.getAttacker() instanceof ServerPlayerEntity player) {
                 if (!player.isCreative()) {
-                    // Keep mining cadence vanilla-like: at most one progress step per tick.
-                    if (lastDamageTick == this.age) {
-                        return true;
-                    }
+                    if (lastDamageTick == this.age) return true;
                     lastDamageTick = this.age;
-
-
                     BlockPos pos = this.getBlockPos();
                     BlockState state = this.getBlockState();
-
-                    if (state == null) {
-                        // Fallback
-                        state = BlockStateRegistry.getDefaultStateFor("air");
-                    }
-
-                    // keep playing the block breaking sound.
-
+                    if (state == null) state = BlockStateRegistry.getDefaultStateFor("air");
                     SoundEvent hitSound = state.getSoundGroup().getHitSound();
                     SoundEvent breakSound = state.getSoundGroup().getBreakSound();
                     world.playSound(null, pos, hitSound, SoundCategory.BLOCKS, 1.0F, 1.0F);
-
-
                     float hardness = state.getHardness(world, pos);
-                    if (hardness < 0.0f) {
-                        return false;
-                    }
+                    if (hardness < 0.0f) return false;
                     hardness = Math.max(hardness, 0.25f);
-
                     ItemStack tool = player.getMainHandStack();
                     boolean canHarvest = !state.isToolRequired() || player.canHarvest(state);
                     float breakingSpeed = player.getBlockBreakingSpeed(state);
-                    if (breakingSpeed <= 0.0f) {
-                        return false;
-                    }
-
-                    // Vanilla-like: speed / hardness / (30 when harvestable, else 100).
+                    if (breakingSpeed <= 0.0f) return false;
                     float vanillaDelta = breakingSpeed / hardness / (canHarvest ? 30.0f : 100.0f);
-
                     float progressIncrement = vanillaDelta;
-
-                    // Keep tool-material differences visible (wood < stone < iron < diamond/netherite).
                     if (!tool.isEmpty()) {
                         String toolPath = Registries.ITEM.getId(tool.getItem()).getPath();
                         progressIncrement *= ToolStrength.getToolMultiplier(toolPath);
                     } else {
-                        // Hand mining should still be valid and show crack progression.
                         if (HandMineableBlocks.isHandMineable(this.getBlockIdString())) {
                             progressIncrement *= 1.15f;
                         } else {
-                            // Non-hand-mineable blocks remain slower by hand, but still progress.
                             progressIncrement *= 0.55f;
                         }
                     }
-
-                    // Prevent pathological spikes while preserving material differences.
                     progressIncrement = MathHelper.clamp(progressIncrement, 0.0f, 0.25f);
-
-                    // Ensure tiny-but-visible progress for hand mining so cracks appear as expected.
-                    if (tool.isEmpty()) {
-                        progressIncrement = Math.max(progressIncrement, 0.0012f);
-                    }
-
-
-                    // Increase the mining progress.
+                    if (tool.isEmpty()) progressIncrement = Math.max(progressIncrement, 0.0012f);
                     this.miningProgress += progressIncrement;
                     this.getDataTracker().set(MINING_PROGRESS, this.miningProgress);
-
-
-                    // If the mining progress exceeds the threshold, finalize the break.
                     if (this.miningProgress >= MINING_THRESHOLD) {
-                        // Play the block break sound (using the block's sound group)
                         world.playSound(null, pos, breakSound, SoundCategory.BLOCKS, 1.0F, 1.0F);
-
-
-                        // Drop the items.
                         List<ItemStack> drops = Block.getDroppedStacks(state, world, pos, null, player, tool);
                         if (!drops.isEmpty()) {
-                            for (ItemStack drop : drops) {
-                                ItemScatterer.spawn(world, pos.getX(), pos.getY(), pos.getZ(), drop);
-                            }
+                            for (ItemStack drop : drops) ItemScatterer.spawn(world, pos.getX(), pos.getY(), pos.getZ(), drop);
                         }
-
                         this.discard();
-                        miningProgress = 0.0f; // reset mining progress.
+                        miningProgress = 0.0f;
                         this.getDataTracker().set(MINING_PROGRESS, this.miningProgress);
-
                         value = true;
                     }
-                }
-                else {
-                    // player is in creative mode, we just discard the entity.
+                } else {
                     BlockState state = this.getBlockState();
                     BlockPos pos = this.getBlockPos();
                     SoundEvent breakSound = state.getSoundGroup().getBreakSound();
                     world.playSound(null, pos, breakSound, SoundCategory.BLOCKS, 1.0F, 1.0F);
                     this.discard();
                 }
-
             }
         }
         return value;
     }
 
     private static String getPathOnly(String id) {
-        if (id == null || id.isBlank()) {
-            return "";
-        }
+        if (id == null || id.isBlank()) return "";
         String normalized = id.toLowerCase();
-        if (normalized.contains(":")) {
-            normalized = normalized.substring(normalized.indexOf(':') + 1);
-        }
+        if (normalized.contains(":")) normalized = normalized.substring(normalized.indexOf(':') + 1);
         return normalized;
     }
 
-
-
-    // Save custom data (block state) to NBT
     @Override
     protected void writeCustomDataToNbt(NbtCompound nbt) {
         nbt.putFloat("RotationAngle", rotationAngle);
@@ -1024,18 +872,12 @@ public class GravityBlockEntity extends Entity {
         nbt.putDouble("Weight", this.weight);
         nbt.putInt("SettleTicks", this.settleTicks);
         nbt.putString("BlockId", this.getBlockIdString());
-        if (this.linkedShipUuid != null) {
-            nbt.putUuid("LinkedShipUuid", this.linkedShipUuid);
-        }
-        if (this.blockState != null) {
-            nbt.put("BlockState", NbtHelper.fromBlockState(this.blockState));
-        }
+        if (this.linkedShipUuid != null) nbt.putUuid("LinkedShipUuid", this.linkedShipUuid);
+        if (this.blockState != null) nbt.put("BlockState", NbtHelper.fromBlockState(this.blockState));
     }
 
-    // Load custom data (block state) from NBT
     @Override
     protected void readCustomDataFromNbt(NbtCompound nbt) {
-
         rotationAngle = nbt.getFloat("RotationAngle");
         previousRotationAngle = nbt.contains("PreviousRotationAngle") ? nbt.getFloat("PreviousRotationAngle") : rotationAngle;
         angularVelocity = nbt.getFloat("AngularVelocity");
@@ -1046,12 +888,8 @@ public class GravityBlockEntity extends Entity {
         this.settleTicks = nbt.contains("SettleTicks") ? nbt.getInt("SettleTicks") : 0;
         this.miningProgress = nbt.contains("MiningProgress") ? nbt.getFloat("MiningProgress") : 0.0f;
         this.weight = nbt.contains("Weight") ? nbt.getDouble("Weight") : this.weight;
-
         BlockState restoredState = null;
-        if (nbt.contains("BlockId")) {
-            restoredState = BlockStateRegistry.getDefaultStateFor(nbt.getString("BlockId"));
-        }
-
+        if (nbt.contains("BlockId")) restoredState = BlockStateRegistry.getDefaultStateFor(nbt.getString("BlockId"));
         this.setBlockState(restoredState == null ? Blocks.AIR.getDefaultState() : restoredState);
         this.getDataTracker().set(ROLL, this.roll);
         this.getDataTracker().set(TIMER_STATE, this.landingTimer);
@@ -1069,57 +907,18 @@ public class GravityBlockEntity extends Entity {
         this.getDataTracker().set(PLAYER_LOAD, this.smoothedPlayerLoad);
     }
 
-
-
-    // getters and setters
-
-    public Vec3d getCenterOfMassOffset() {
-        return centerOfMassOffset;
-    }
-
-    public void setCenterOfMassOffset(Vec3d centerOfMassOffset) {
-        this.centerOfMassOffset = centerOfMassOffset;
-    }
-
-    public float getRotationAngle() {
-        return rotationAngle;
-    }
-
-    public void setRotationAngle(float rotationAngle) {
-        this.rotationAngle = rotationAngle;
-    }
-
-    public float getPreviousRotationAngle() {
-        return previousRotationAngle;
-    }
-
-    public void setPreviousRotationAngle(float previousRotationAngle) {
-        this.previousRotationAngle = previousRotationAngle;
-    }
-
-    public float getAngularVelocity() {
-        return angularVelocity;
-    }
-
-    public void setAngularVelocity(float angularVelocity) {
-        this.angularVelocity = angularVelocity;
-    }
-
-    public float getAngularMomentum() {
-        return angularMomentum;
-    }
-
-    public void setAngularMomentum(float angularMomentum) {
-        this.angularMomentum = angularMomentum;
-    }
-
-    public double getWeight() {
-        return weight;
-    }
-
-    public void setWeight(double weight) {
-        this.weight = weight;
-    }
+    public Vec3d getCenterOfMassOffset() { return centerOfMassOffset; }
+    public void setCenterOfMassOffset(Vec3d centerOfMassOffset) { this.centerOfMassOffset = centerOfMassOffset; }
+    public float getRotationAngle() { return rotationAngle; }
+    public void setRotationAngle(float rotationAngle) { this.rotationAngle = rotationAngle; }
+    public float getPreviousRotationAngle() { return previousRotationAngle; }
+    public void setPreviousRotationAngle(float previousRotationAngle) { this.previousRotationAngle = previousRotationAngle; }
+    public float getAngularVelocity() { return angularVelocity; }
+    public void setAngularVelocity(float angularVelocity) { this.angularVelocity = angularVelocity; }
+    public float getAngularMomentum() { return angularMomentum; }
+    public void setAngularMomentum(float angularMomentum) { this.angularMomentum = angularMomentum; }
+    public double getWeight() { return weight; }
+    public void setWeight(double weight) { this.weight = weight; }
 
     public void setShipControlledPosition(Vec3d targetPos) {
         this.setShipControlledTransform(targetPos, this.getYaw());
@@ -1147,15 +946,7 @@ public class GravityBlockEntity extends Entity {
         this.setNoGravity(false);
     }
 
-    public void setLinkedShipUuid(UUID linkedShipUuid) {
-        this.linkedShipUuid = linkedShipUuid;
-    }
-
-    public UUID getLinkedShipUuid() {
-        return this.linkedShipUuid;
-    }
-
-    public boolean isShipControlled() {
-        return this.shipControlled;
-    }
+    public void setLinkedShipUuid(UUID linkedShipUuid) { this.linkedShipUuid = linkedShipUuid; }
+    public UUID getLinkedShipUuid() { return this.linkedShipUuid; }
+    public boolean isShipControlled() { return this.shipControlled; }
 }
