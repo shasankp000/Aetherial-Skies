@@ -9,11 +9,22 @@ package net.shasankp000.Ship.Physics;
  * regardless of density or pool depth.
  *
  * Tuning:
- *   BUOY_P  – proportional gain.  Higher = faster correction, but
- *              over-damped requires BUOY_D big enough.
+ *   BUOY_P  – proportional gain (acceleration units, blocks/tick²/block-error).
+ *              Must satisfy BUOY_P > GRAVITY at the expected operating error so
+ *              the net upward acceleration can overcome gravity.
+ *              At error=1 block, a_buoy = BUOY_P – GRAVITY must be > 0.
+ *              Previous value (0.06) gave a_buoy = 0.06 – 0.04 = 0.02 at error=1,
+ *              which was divided by mass (76), leaving only 0.00026/tick² — the
+ *              ship would never float.
+ *
+ *   NOTE: a_buoy is NOT divided by mass.  BUOY_P/D operate on acceleration
+ *         directly (like GRAVITY itself), so they are mass-independent.
+ *         This matches how GRAVITY is applied in the engine (no mass division).
+ *
  *   BUOY_D  – derivative (velocity) damping.  Critical damp condition:
- *              BUOY_D ≥ 2 * sqrt(BUOY_P).  We use ~3× for over-damping.
- *   With P=0.06, critical D = 2*sqrt(0.06) ≈ 0.49.  We use D=0.55.
+ *              BUOY_D ≥ 2 * sqrt(BUOY_P).
+ *              With P=0.15, critical D = 2*sqrt(0.15) ≈ 0.775.  We use D=0.85
+ *              for over-damped (no oscillation) settling.
  */
 public class PhysicsConfig {
 
@@ -22,15 +33,19 @@ public class PhysicsConfig {
     /** Gravity acceleration (blocks/tick²). */
     public static final double GRAVITY          = 0.04D;
 
-    /** Buoyancy proportional gain (spring toward waterline). */
-    public static final double BUOY_P           = 0.06D;
+    /**
+     * Buoyancy proportional gain (acceleration, blocks/tick² per block of error).
+     * Must be large enough that BUOY_P * error > GRAVITY for the ship to rise.
+     * At the nominal operating error of ~1 block: net_a = 0.15 - 0.04 = +0.11/tick².
+     */
+    public static final double BUOY_P           = 0.15D;
 
     /**
-     * Buoyancy derivative gain (damps velocity when near waterline).
-     * Must satisfy BUOY_D >= 2*sqrt(BUOY_P) for over-damped settling.
-     * 2*sqrt(0.06) = 0.49 → we use 0.55 (safely over-damped).
+     * Buoyancy derivative gain (damps vertical velocity near the waterline).
+     * Over-damped condition: BUOY_D >= 2*sqrt(BUOY_P).
+     * 2*sqrt(0.15) = 0.775 → we use 0.85 (safely over-damped, no bounce).
      */
-    public static final double BUOY_D           = 0.55D;
+    public static final double BUOY_D           = 0.85D;
 
     /**
      * How many blocks below the water surface the hull bottom should rest.
